@@ -1,0 +1,29 @@
+[project]
+name = "arxiv-paper-discovery"
+version = "0.1.0"
+description = "End to end ML application for categorizing research papers."
+requires-python = ">=3.11"
+
+dependencies = [
+    "torch",
+    "transformers",
+    "datasets",
+    "accelerate",
+    "pandas",
+    "numpy",
+    "scikit-learn",
+    "mlflow",
+    "pyyaml",
+    "tqdm"
+]
+
+[project.optional-dependencies]
+
+serve = [
+    "ray[serve]",
+    "fastapi",
+    "uvicorn"
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
