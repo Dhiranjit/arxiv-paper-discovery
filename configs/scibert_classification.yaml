@@ -1,0 +1,27 @@
+experiment:
+  name: scibert_classification
+  seed: 42
+
+model:
+  dropout_p: 0.1
+  pretrained_name: allenai/scibert_scivocab_uncased
+
+optimizer:
+  lr: 4.3e-05
+  name: AdamW
+  weight_decay: 0.01
+
+scheduler:
+  name: linear
+  warmup_ratio: 0.1
+
+training:
+  accumulation_steps: 4
+  batch_size: 4
+  epochs: 3
+  primary_metric: f1
+  metric_mode: max
+  
+  # Set to null (~) for full training runs
+  max_train_samples: 1000000
+  max_val_samples: 10000
