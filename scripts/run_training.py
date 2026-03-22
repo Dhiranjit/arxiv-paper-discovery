@@ -1,3 +1,49 @@
+"""
+Train the SciBERT multi-label classifier on the tokenized ArXiv taxonomy dataset.
+
+This script:
+1. Loads training configuration from a YAML file.
+2. Resolves dataset and label-map paths from CLI, config, or sensible defaults.
+3. Loads tokenized train/validation splits from disk.
+4. Builds dataloaders, model, optimizer, scheduler, and loss.
+5. Trains with Hugging Face Accelerate (supports mixed precision and accumulation).
+6. Tracks validation metrics and saves best/last/step checkpoints (configurable).
+7. Supports resuming from a saved checkpoint directory.
+
+Inputs:
+- Config file passed via `--config`
+- Tokenized dataset directory (CLI/config/default inferred from model name)
+- Label index mapping JSON (CLI/config/default)
+
+Output:
+- Training artifacts under `saved_models/<run-id>/` (or custom `--save-dir`)
+
+Run:
+- `python3 scripts/run_training.py \
+    --config <config_path> \
+    --run-id <run_id> \
+    [--save-dir <save_dir>] \
+    [--resume <checkpoint_dir>] \
+    [--tokenized-data-dir <dataset_dir>] \
+    [--label-map-path <group_to_index.json>] \
+    [--no-save]`
+    
+- `python3 scripts/run_training.py \
+    --config configs/scibert_classification.yaml \
+    --run-id scibert_baseline`
+
+
+python3 scripts/run_training.py \
+  --config configs/scibert_classification.yaml \
+  --run-id scibert_final \
+  --sample-ratio 0.01
+
+
+- `python3 scripts/run_training.py \
+    --config configs/scibert_classification.yaml \
+    --resume saved_models/<run-id>/last`
+"""
+
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import warnings
@@ -6,248 +52,263 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 logging.set_verbosity_error()
 
 import argparse
-import copy
 import json
 import math
+import re
 from pathlib import Path
-from typing import Any
 
-import mlflow
 import torch
 import yaml
-import optuna
-from datasets import load_from_disk
 from accelerate import Accelerator
+from datasets import load_from_disk
 from transformers import BertModel, BertTokenizer
 
 from arxiv_paper_discovery.config import PROCESSED_DATA_DIR
 from arxiv_paper_discovery.data import create_dataloader
 from arxiv_paper_discovery.models import SciBERTClassifier
-from arxiv_paper_discovery.train import train
-from arxiv_paper_discovery.utils import metric_fn, set_seed, build_scheduler, flatten_dict
+from arxiv_paper_discovery.train import CheckpointConfig, load_checkpoint, train
+from arxiv_paper_discovery.utils import build_scheduler, metric_fn, set_seed
 
 
-def _set_nested(cfg: dict[str, Any], dotted_key: str, value: Any) -> None:
-    keys = dotted_key.split(".")
-    cursor = cfg
-    for key in keys[:-1]:
-        if key not in cursor or not isinstance(cursor[key], dict):
-            cursor[key] = {}
-        cursor = cursor[key]
-    cursor[keys[-1]] = value
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _infer_run_id_from_resume_path(resume_path: Path) -> str | None:
+    """Infer run id from a resumable checkpoint path: .../<run-id>/(last|step-N)."""
+    tag = resume_path.name
+    if tag == "last" or tag.startswith("step-"):
+        run_id = resume_path.parent.name
+        return run_id or None
+    return None
 
 
-def _apply_sweep_space(trial: optuna.trial.Trial, cfg: dict[str, Any], sweep_cfg: dict[str, Any] | None) -> dict[str, Any]:
-    sampled_params: dict[str, Any] = {}
-
-    sweep_params = (sweep_cfg or {}).get("sweep", {})
-    if not sweep_params:
-        # Backward-compatible fallback when no external sweep config is provided.
-        lr = trial.suggest_float("optimizer.lr", 1e-5, 1e-4, log=True)
-        dropout_p = trial.suggest_categorical("model.dropout_p", [0.1, 0.2, 0.3, 0.4, 0.5])
-        _set_nested(cfg, "optimizer.lr", lr)
-        _set_nested(cfg, "model.dropout_p", dropout_p)
-        sampled_params["optimizer.lr"] = lr
-        sampled_params["model.dropout_p"] = dropout_p
-        return sampled_params
-
-    for name, spec in sweep_params.items():
-        param_type = spec.get("type", "float")
-        if param_type == "float":
-            sampled_value = trial.suggest_float(
-                name,
-                spec["low"],
-                spec["high"],
-                log=spec.get("log", False),
-                step=spec.get("step")
-            )
-        elif param_type == "int":
-            sampled_value = trial.suggest_int(
-                name,
-                spec["low"],
-                spec["high"],
-                log=spec.get("log", False),
-                step=spec.get("step", 1)
-            )
-        elif param_type == "categorical":
-            sampled_value = trial.suggest_categorical(name, spec["choices"])
-        else:
-            raise ValueError(f"Unsupported sweep param type '{param_type}' for '{name}'.")
-
-        _set_nested(cfg, name, sampled_value)
-        sampled_params[name] = sampled_value
-
-    return sampled_params
+def _model_name_to_slug(name: str) -> str:
+    """Convert a model id to a filesystem-safe suffix."""
+    return re.sub(r"[^a-zA-Z0-9._-]+", "-", name.strip())
 
 
-def execute_training_run(args, cfg, trial=None):
-    exp_cfg = cfg["experiment"]
+def _resolve_tokenized_dataset_path(args: argparse.Namespace, cfg: dict) -> Path:
+    """
+    Resolve tokenized dataset path in priority order:
+    1) CLI `--tokenized-data-dir`
+    2) Config `data.tokenized_dataset_dir`
+    3) Inferred default: `data/processed/tok_<model-slug>`
+    """
+    cli_path = getattr(args, "tokenized_data_dir", None)
+    if cli_path:
+        return Path(cli_path)
+
+    data_cfg = cfg.get("data") or {}
+    cfg_path = data_cfg.get("tokenized_dataset_dir")
+    if cfg_path:
+        return Path(cfg_path)
+
+    model_slug = _model_name_to_slug(cfg["model"]["pretrained_name"])
+    return PROCESSED_DATA_DIR / f"tok_{model_slug}"
+
+
+def _resolve_label_map_path(args: argparse.Namespace, cfg: dict) -> Path:
+    """
+    Resolve label map path in priority order:
+    1) CLI `--label-map-path`
+    2) Config `data.group_to_index_path`
+    3) Default: `data/processed/group_to_index.json`
+    """
+    cli_path = getattr(args, "label_map_path", None)
+    if cli_path:
+        return Path(cli_path)
+
+    data_cfg = cfg.get("data") or {}
+    cfg_path = data_cfg.get("group_to_index_path")
+    if cfg_path:
+        return Path(cfg_path)
+
+    return PROCESSED_DATA_DIR / "group_to_index.json"
+
+
+# ---------------------------------------------------------------------------
+# Core training run
+# ---------------------------------------------------------------------------
+
+def execute_training_run(args: argparse.Namespace, cfg: dict) -> dict:
+    exp_cfg   = cfg["experiment"]
     model_cfg = cfg["model"]
     train_cfg = cfg["training"]
-    opt_cfg = cfg["optimizer"]
-    sched_cfg = cfg.get("scheduler", {}) or {}
+    opt_cfg   = cfg["optimizer"]
+    sched_cfg = cfg.get("scheduler") or {}
 
     accumulation_steps = train_cfg.get("accumulation_steps", 1)
-    metric_mode = train_cfg.get("metric_mode", "max")
-    
-    max_train_samples = train_cfg.get("max_train_samples")
-    max_val_samples = train_cfg.get("max_val_samples")
+    metric_mode        = train_cfg.get("metric_mode", "max")
+    cli_sample_ratio   = getattr(args, "sample_ratio", None)
+    sample_ratio       = cli_sample_ratio if cli_sample_ratio is not None else train_cfg.get("sample_ratio")
+    threshold          = train_cfg.get("threshold", 0.5)
+
+    ckpt_cfg = CheckpointConfig(
+        save_dir          = args.save_dir / args.run_id,
+        save_best         = not args.no_save and train_cfg.get("save_best_model", True),
+        save_last         = not args.no_save and train_cfg.get("save_last_checkpoint", True),
+        every_n_steps     = None if args.no_save else train_cfg.get("save_every_n_steps"),
+        keep_n_step_ckpts = train_cfg.get("keep_last_n_step_ckpts", 1),
+    )
 
     set_seed(exp_cfg["seed"])
 
-    # --- Initialize Accelerate ---
-    accelerator = Accelerator(
-        gradient_accumulation_steps=accumulation_steps
-    )
+    # ---- Accelerate ----
+    accelerator        = Accelerator(gradient_accumulation_steps=accumulation_steps)
     resolved_precision = accelerator.mixed_precision
 
-    dataset = load_from_disk(str(PROCESSED_DATA_DIR / "arxiv_classification_dataset"))
+    # ---- Data ----
+    dataset_path  = _resolve_tokenized_dataset_path(args, cfg)
+    label_map_path = _resolve_label_map_path(args, cfg)
+
+    dataset       = load_from_disk(str(dataset_path))
     train_dataset = dataset["train"]
-    val_dataset = dataset["val"]
+    val_dataset   = dataset["val"]
 
-    if max_train_samples is not None:
-        limit = min(max_train_samples, len(train_dataset))
-        train_dataset = train_dataset.select(range(limit))
-        accelerator.print(f"Limiting training dataset to {limit} samples.")
+    if sample_ratio is not None and 0.0 < sample_ratio < 1.0:
+        train_limit   = int(len(train_dataset) * sample_ratio)
+        val_limit     = int(len(val_dataset)   * sample_ratio)
+        train_dataset = train_dataset.shuffle(seed=exp_cfg["seed"]).select(range(train_limit))
+        val_dataset   = val_dataset.shuffle(seed=exp_cfg["seed"]).select(range(val_limit))
+        accelerator.print(
+            f"Sampled {train_limit} train / {val_limit} val examples ({sample_ratio*100:.0f}%)."
+        )
 
-    if max_val_samples is not None:
-        limit = min(max_val_samples, len(val_dataset))
-        val_dataset = val_dataset.select(range(limit))
-        accelerator.print(f"Limiting validation dataset to {limit} samples.")
-
-    with open(PROCESSED_DATA_DIR / "category_to_index.json") as f:
+    with open(label_map_path) as f:
         class_to_index = json.load(f)
 
-    tokenizer = BertTokenizer.from_pretrained(model_cfg["pretrained_name"])
-
+    tokenizer        = BertTokenizer.from_pretrained(model_cfg["pretrained_name"])
     train_dataloader = create_dataloader(
         train_dataset, tokenizer, batch_size=train_cfg["batch_size"], shuffle=True
     )
-    val_dataloader = create_dataloader(
+    val_dataloader   = create_dataloader(
         val_dataset, tokenizer, batch_size=train_cfg["batch_size"], shuffle=False
     )
 
+    # ---- Model ----
     scibert = BertModel.from_pretrained(model_cfg["pretrained_name"])
-    model = SciBERTClassifier(
+    model   = SciBERTClassifier(
         llm=scibert, dropout_p=model_cfg["dropout_p"], num_classes=len(class_to_index)
     )
 
-    loss_fn = torch.nn.BCEWithLogitsLoss()
-
+    # ---- Optimizer / scheduler / loss ----
+    loss_fn       = torch.nn.BCEWithLogitsLoss()
     optimizer_cls = getattr(torch.optim, opt_cfg["name"])
-    opt_kwargs = {k: v for k, v in opt_cfg.items() if k != "name"}
-    optimizer = optimizer_cls(model.parameters(), **opt_kwargs)
-
-    effective_steps_per_epoch = math.ceil(len(train_dataloader) / accumulation_steps)
-    scheduler = build_scheduler(
-        sched_cfg, optimizer, train_cfg["epochs"], effective_steps_per_epoch
+    optimizer     = optimizer_cls(
+        model.parameters(),
+        **{k: v for k, v in opt_cfg.items() if k != "name"},
     )
+    effective_steps_per_epoch = math.ceil(len(train_dataloader) / accumulation_steps)
+    scheduler = build_scheduler(sched_cfg, optimizer, train_cfg["epochs"], effective_steps_per_epoch)
 
+    # ---- Accelerate.prepare ----
     model, optimizer, train_dataloader, val_dataloader, scheduler = accelerator.prepare(
         model, optimizer, train_dataloader, val_dataloader, scheduler
     )
 
-    run_save_dir = args.save_dir / args.run_id
+    # ---- Resume ----
+    resume_state = None
+    if args.resume:
+        resume_state = load_checkpoint(accelerator, args.resume)
 
-    if accelerator.is_main_process:
-        args.mlflow_dir.mkdir(parents=True, exist_ok=True)
-        mlflow.set_tracking_uri(f"file://{args.mlflow_dir.resolve()}")
-        mlflow.set_experiment(exp_cfg["name"])
-        
-        mlflow.start_run(run_name=args.run_id)
-        
-        mlflow.log_artifact(str(args.config), artifact_path="config")
-        flat_cfg = flatten_dict(cfg)
-        flat_cfg["hardware/mixed_precision"] = resolved_precision
-        mlflow.log_params(flat_cfg)
+    # ---- Banner ----
+    world_size           = accelerator.num_processes
+    effective_batch_size = train_cfg["batch_size"] * accumulation_steps * world_size
+    scheduler_name       = sched_cfg.get("name", "none")
+    resume_mode          = f"resume ({args.resume})" if args.resume else "fresh"
+    sample_ratio_text    = f"{sample_ratio:.2f}" if sample_ratio is not None else "none"
 
-    accelerator.print(f"\n{'='*60}")
-    accelerator.print(f" Run: {args.run_id} | Config: {args.config.name}")
-    accelerator.print(f" bs: {train_cfg['batch_size']} | accum: {accumulation_steps} | "
-          f"lr: {opt_cfg['lr']} | epochs: {train_cfg['epochs']} | amp: {resolved_precision}")
-    accelerator.print(f"{'='*60}\n")
+    accelerator.print(
+        f"\n{'='*72}\n"
+        f" Run    : {args.run_id} | Config: {args.config.name}\n"
+        f" Mode   : {resume_mode} | Seed: {exp_cfg['seed']} | "
+        f"Device: {accelerator.device} | World: {world_size}\n"
+        f" Data   : train={len(train_dataset)} | val={len(val_dataset)} | "
+        f"sample_ratio={sample_ratio_text}\n"
+        f" Paths  : tokenized={dataset_path} | labels={label_map_path}\n"
+        f" Batch  : per_device={train_cfg['batch_size']} | accum={accumulation_steps} | "
+        f"effective={effective_batch_size}\n"
+        f" Steps  : batches/epoch={len(train_dataloader)} | "
+        f"opt_steps/epoch={effective_steps_per_epoch}\n"
+        f" Optim  : {opt_cfg['name']} | lr={opt_cfg['lr']} | "
+        f"wd={opt_cfg.get('weight_decay', 0.0)} | sched={scheduler_name}\n"
+        f" Train  : epochs={train_cfg['epochs']} | primary={train_cfg['primary_metric']} | "
+        f"mode={metric_mode} | amp={resolved_precision} | threshold={threshold}\n"
+        f" Save   : best={ckpt_cfg.save_best} | last={ckpt_cfg.save_last} | "
+        f"every_n_steps={ckpt_cfg.every_n_steps} | keep_step_ckpts={ckpt_cfg.keep_n_step_ckpts}\n"
+        f"{'='*72}\n"
+    )
 
-    try:
-        results = train(
-            model=model, train_dataloader=train_dataloader, val_dataloader=val_dataloader,
-            optimizer=optimizer, loss_fn=loss_fn, accelerator=accelerator,
-            epochs=train_cfg["epochs"], metric_fn=metric_fn,             
-            primary_metric=train_cfg["primary_metric"], mode=metric_mode,
-            scheduler=scheduler, config=cfg, save_best_model=not args.no_save,
-            save_dir=run_save_dir, trial=trial
-        )
-    except optuna.exceptions.TrialPruned:
-        if accelerator.is_main_process:
-            mlflow.end_run(status="KILLED")
-        raise
+    results = train(
+        model=model,
+        train_dataloader=train_dataloader,
+        val_dataloader=val_dataloader,
+        optimizer=optimizer,
+        loss_fn=loss_fn,
+        accelerator=accelerator,
+        epochs=train_cfg["epochs"],
+        metric_fn=metric_fn,
+        primary_metric=train_cfg["primary_metric"],
+        mode=metric_mode,
+        scheduler=scheduler,
+        config=cfg,
+        threshold=threshold,
+        ckpt_cfg=ckpt_cfg,
+        resume_state=resume_state,
+    )
 
     if accelerator.is_main_process:
         best_val_metrics = results.get("best_metrics", {})
         if best_val_metrics:
             metrics_str = " | ".join(f"{k}: {v:.4f}" for k, v in best_val_metrics.items())
             accelerator.print(f"\nBest validation metrics: {metrics_str}\n")
-            
-            run_save_dir.mkdir(parents=True, exist_ok=True)
-            metrics_path = run_save_dir / "metrics.json"
-            with open(metrics_path, "w") as f:
-                json.dump(best_val_metrics, f)
-
-        mlflow.end_run()
 
     return results
 
 
-def sweep_objective(trial, args, base_cfg, sweep_cfg=None):
-    """Callback for running an isolated trial locally inside the subprocess worker."""
-    cfg = copy.deepcopy(base_cfg)
-    sampled_params = _apply_sweep_space(trial, cfg, sweep_cfg)
-    sampled_tokens = [f"{k.split('.')[-1]}-{v}" for k, v in sampled_params.items()]
-    args.run_id = f"sweep-trial-{trial.number}_" + "_".join(sampled_tokens)
-    
-    results = execute_training_run(args, cfg, trial=trial)
-    
-    primary_metric = cfg.get("training", {}).get("primary_metric", "f1")
-    best_score = results.get("best_metrics", {}).get(primary_metric)
-    
-    if best_score is None:
-        raise ValueError(f"Could not find '{primary_metric}' in results for Trial {trial.number}.")
-        
-    return best_score
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
-
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="Train SciBERT article classifier")
-    parser.add_argument("--config", type=Path, required=True, help="Path to the YAML config")
-    parser.add_argument("--sweep-config", type=Path, default=Path("configs/scibert_sweep.yaml"),
-                        help="Path to YAML sweep definition (used with --sweep)")
-    parser.add_argument("--run-id", type=str, help="Experiment identifier (required if not sweeping)")
-    parser.add_argument("--no-save", action="store_true", help="Disable saving model weights")
+    parser.add_argument("--config",   type=Path, required=True,
+                        help="Path to the training YAML config")
+    parser.add_argument("--run-id",   type=str,
+                        help="Experiment identifier (required for fresh runs; "
+                             "inferred from --resume path if omitted)")
+    parser.add_argument("--no-save",  action="store_true",
+                        help="Disable all model/checkpoint saving")
+    parser.add_argument("--resume",   type=Path, default=None,
+                        help="Path to a resumable checkpoint dir (last/ or step-N/)")
     parser.add_argument("--save-dir", type=Path, default=Path("saved_models"))
-    parser.add_argument("--mlflow-dir", type=Path, default=Path("mlruns"))
-    
-    # Optuna integration arguments
-    parser.add_argument("--sweep", action="store_true", help="Run as part of an Optuna sweep via SQLite.")
-    parser.add_argument("--study-name", type=str, default="scibert-sweep")
-    parser.add_argument("--storage", type=str, default="sqlite:///scibert_sweep.db")
-    
+    parser.add_argument("--tokenized-data-dir", type=Path, default=None,
+                        help="Path to tokenized dataset directory (overrides config/default)")
+    parser.add_argument("--label-map-path", type=Path, default=None,
+                        help="Path to group_to_index.json (overrides config/default)")
+    parser.add_argument("--sample-ratio", type=float, default=None, metavar="(0-1]",
+                        help="Override training.sample_ratio from config (set null in config for full-data default)")
+
     args = parser.parse_args()
 
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
 
-    sweep_cfg = None
-    if args.sweep and args.sweep_config.exists():
-        with open(args.sweep_config) as f:
-            sweep_cfg = yaml.safe_load(f) or {}
+    if args.resume and not args.run_id:
+        inferred = _infer_run_id_from_resume_path(args.resume)
+        if inferred:
+            args.run_id = inferred
 
-    if args.sweep:
-        study = optuna.load_study(study_name=args.study_name, storage=args.storage)
-        # Execute exactly one trial per subprocess
-        study.optimize(lambda t: sweep_objective(t, args, cfg, sweep_cfg=sweep_cfg), n_trials=1)
-    else:
-        if not args.run_id:
-            parser.error("--run-id is required when not running a sweep.")
-        execute_training_run(args, cfg)
+    if not args.run_id:
+        parser.error(
+            "--run-id is required for fresh runs. If resuming, pass --resume as "
+            ".../<run-id>/last or .../<run-id>/step-N to infer run id automatically."
+        )
+    if args.sample_ratio is not None and not (0.0 < args.sample_ratio <= 1.0):
+        parser.error("--sample-ratio must be in the range (0, 1].")
+
+    execute_training_run(args, cfg)
 
 
 if __name__ == "__main__":

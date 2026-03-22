@@ -8,7 +8,7 @@ def clean_text(text):
         return ""
     
     text = re.sub(r"http\S+", "", text)         # remove URLs
-    text = re.sub(r"\s+", " ", text).strip()     # normalize whitespace
+    text = re.sub(r"\s+", " ", text).strip()    # normalize whitespace
     return text
 
 
@@ -24,21 +24,6 @@ def process_categories(batch):
     """Splits the space-separated ArXiv categories into lists."""
     cats = [c.split(" ") for c in batch["categories"]]
     return {"categories": cats}
-
-
-def encode_labels(batch, category_to_idx):
-    """Creates multi-hot encoded label vectors for BCEWithLogitsLoss"""
-    num_classes = len(category_to_idx)
-    batch_labels = []
-
-    for cat_list in batch["categories"]:
-        label_vector = [0.0] * num_classes
-        for cat in cat_list:
-            if cat in category_to_idx:
-                label_vector[category_to_idx[cat]] = 1.0
-        batch_labels.append(label_vector)
-    
-    return {"labels": batch_labels}
 
 
 def tokenize_batch(batch, tokenizer):

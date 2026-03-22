@@ -1,3 +1,7 @@
+# Download the arXiv dataset using the Kaggle API if it has not already been downloaded.
+# The datset is saved in the data/raw/arxiv directory.
+
+
 #!/usr/bin/env bash
 set -e
 

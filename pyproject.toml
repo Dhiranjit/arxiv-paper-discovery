@@ -20,10 +20,12 @@ dependencies = [
 [project.optional-dependencies]
 
 serve = [
-    "ray[serve]",
     "fastapi",
     "uvicorn"
 ]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+arxiv_paper_discovery = ["web/*.html"]

@@ -1,8 +1,13 @@
 import torch
 import random
 import numpy as np
+from collections import Counter
+from tqdm import tqdm
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 from transformers import get_scheduler
+import pandas as pd
+
+
 
 
 def flatten_dict(d, parent_key='', sep='.'):
@@ -70,3 +75,29 @@ def build_scheduler(sched_cfg: dict, optimizer, epochs: int, steps_per_epoch: in
         num_warmup_steps=warmup_steps,
         num_training_steps=num_training_steps,
     )
+
+
+def compute_label_coverage(dataset):
+    label_counter = Counter()
+
+    for labels in tqdm(dataset["categories"], desc="Counting labels"):
+        label_counter.update(labels)
+
+    sorted_labels = [l for l, _ in label_counter.most_common()]
+    label_sets = [set(labels) for labels in dataset["categories"]]
+
+    total = len(label_sets)
+    covered_mask = [False] * total
+    covered_count = 0
+
+    coverage = []
+
+    for label in tqdm(sorted_labels, desc="Computing coverage"):
+        for i, paper_labels in enumerate(label_sets):
+            if not covered_mask[i] and label in paper_labels:
+                covered_mask[i] = True
+                covered_count += 1
+
+        coverage.append(covered_count / total * 100)
+
+    return coverage, sorted_labels

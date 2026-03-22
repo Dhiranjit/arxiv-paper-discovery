@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>arXiv Tagger</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg:        #0d0f14;
+    --surface:   #13161e;
+    --border:    #1f2535;
+    --accent:    #4ade9a;
+    --accent2:   #38bdf8;
+    --muted:     #3a4060;
+    --text:      #c9d1e8;
+    --text-dim:  #5a6380;
+    --danger:    #f87171;
+    --tag-bg:    #0e2a1f;
+    --tag-border:#1a4a32;
+    --radius:    6px;
+    --mono:      'IBM Plex Mono', monospace;
+    --sans:      'IBM Plex Sans', sans-serif;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 14px;
+    min-height: 100vh;
+    display: grid;
+    grid-template-rows: auto 1fr;
+  }
+
+  /* ── Header ── */
+  header {
+    border-bottom: 1px solid var(--border);
+    padding: 14px 28px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: var(--surface);
+  }
+
+  .logo {
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--accent);
+    letter-spacing: 0.08em;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .logo::before {
+    content: '';
+    display: block;
+    width: 8px; height: 8px;
+    background: var(--accent);
+    border-radius: 50%;
+    box-shadow: 0 0 8px var(--accent);
+  }
+
+  .health-badge {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 3px 10px;
+    border-radius: 20px;
+    border: 1px solid var(--muted);
+    color: var(--text-dim);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    transition: border-color .2s, color .2s;
+  }
+  .health-badge:hover { border-color: var(--accent); color: var(--accent); }
+  .health-badge .dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--muted);
+    transition: background .3s, box-shadow .3s;
+  }
+  .health-badge.ok .dot   { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+  .health-badge.fail .dot { background: var(--danger);  box-shadow: 0 0 6px var(--danger); }
+
+  /* ── Layout ── */
+  .layout {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0;
+    height: 100%;
+  }
+
+  .panel {
+    padding: 28px;
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+  }
+  .panel:last-child { border-right: none; }
+
+  /* ── Section labels ── */
+  .label {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    margin-bottom: 6px;
+  }
+
+  /* ── Mode tabs ── */
+  .tabs {
+    display: flex;
+    gap: 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    width: fit-content;
+  }
+  .tab {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 6px 16px;
+    cursor: pointer;
+    color: var(--text-dim);
+    background: transparent;
+    border: none;
+    border-right: 1px solid var(--border);
+    transition: background .15s, color .15s;
+    letter-spacing: 0.06em;
+  }
+  .tab:last-child { border-right: none; }
+  .tab.active { background: var(--accent); color: #000; font-weight: 600; }
+  .tab:not(.active):hover { color: var(--text); background: var(--border); }
+
+  /* ── Inputs ── */
+  .field { display: flex; flex-direction: column; gap: 6px; }
+
+  input[type="text"], textarea {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    padding: 10px 14px;
+    outline: none;
+    transition: border-color .2s;
+    resize: none;
+    width: 100%;
+  }
+  input[type="text"]:focus,
+  textarea:focus { border-color: var(--accent); }
+  input::placeholder, textarea::placeholder { color: var(--text-dim); }
+
+  textarea.title-area  { height: 72px; }
+  textarea.abstract-area { height: 160px; }
+  textarea.batch-area  { height: 320px; font-size: 11px; line-height: 1.6; }
+
+  /* ── Server URL ── */
+  .server-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+  .server-row input { flex: 1; }
+  .server-row .pill {
+    font-family: var(--mono);
+    font-size: 10px;
+    padding: 4px 10px;
+    border-radius: 20px;
+    background: var(--muted);
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+
+  /* ── Run button ── */
+  .run-btn {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    padding: 11px 28px;
+    background: var(--accent);
+    color: #000;
+    border: none;
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: opacity .15s, transform .1s;
+    align-self: flex-start;
+  }
+  .run-btn:hover:not(:disabled) { opacity: .85; }
+  .run-btn:active:not(:disabled) { transform: scale(.98); }
+  .run-btn:disabled { opacity: .35; cursor: not-allowed; }
+  .run-btn.loading { opacity: .6; }
+
+  /* ── Results panel ── */
+  .results-wrap {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    overflow-y: auto;
+  }
+
+  .empty-state {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    color: var(--text-dim);
+    font-family: var(--mono);
+    font-size: 12px;
+    opacity: .5;
+  }
+  .empty-state svg { opacity: .3; }
+
+  /* ── Result card ── */
+  .result-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    animation: slideIn .2s ease;
+  }
+  @keyframes slideIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  .card-header {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-dim);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .card-header .title-text {
+    color: var(--text);
+    font-weight: 500;
+    max-width: 70%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .card-body { padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+
+  /* ── Tags ── */
+  .tags-section .label { margin-bottom: 8px; }
+  .tags-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .tag {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--tag-bg);
+    border: 1px solid var(--tag-border);
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--accent);
+    animation: tagPop .15s ease;
+  }
+  @keyframes tagPop {
+    from { transform: scale(.9); opacity: 0; }
+    to   { transform: scale(1);  opacity: 1; }
+  }
+
+  .tag-prob {
+    font-size: 10px;
+    color: var(--accent2);
+    font-weight: 500;
+  }
+
+  .no-tags {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-dim);
+    font-style: italic;
+  }
+
+  /* ── Prob bar ── */
+  .prob-bars { display: flex; flex-direction: column; gap: 6px; }
+  .prob-row  { display: grid; grid-template-columns: 160px 1fr 38px; align-items: center; gap: 8px; }
+  .prob-name { font-family: var(--mono); font-size: 10px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .prob-bar-track {
+    height: 4px;
+    background: var(--border);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .prob-bar-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 2px;
+    transition: width .4s ease;
+  }
+  .prob-val { font-family: var(--mono); font-size: 10px; color: var(--text-dim); text-align: right; }
+
+  /* ── Error toast ── */
+  .error-msg {
+    background: #2a0f0f;
+    border: 1px solid #5a1f1f;
+    border-radius: var(--radius);
+    padding: 10px 14px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--danger);
+  }
+
+  /* ── Batch summary ── */
+  .batch-summary {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-dim);
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .batch-summary span { color: var(--accent); }
+
+  /* ── Scrollbar ── */
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--muted); border-radius: 2px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">ARXIV TAGGER</div>
+  <div class="health-badge" id="healthBadge" onclick="checkHealth()">
+    <span class="dot"></span>
+    <span id="healthText">checking...</span>
+  </div>
+</header>
+
+<div class="layout">
+
+  <!-- LEFT: Input panel -->
+  <div class="panel">
+    <div>
+      <div class="label">Mode</div>
+      <div class="tabs">
+        <button class="tab active" onclick="setMode('single', this)">Single</button>
+        <button class="tab" onclick="setMode('batch', this)">Batch</button>
+      </div>
+    </div>
+
+    <!-- Server config -->
+    <div class="field">
+      <div class="label">Server</div>
+      <div class="server-row">
+        <input type="text" id="serverUrl" value="http://127.0.0.1:8000" placeholder="http://127.0.0.1:8000" />
+        <span class="pill">Ray Serve</span>
+      </div>
+    </div>
+
+    <!-- Single mode -->
+    <div id="singleMode">
+      <div class="field" style="margin-bottom:12px">
+        <div class="label">Title</div>
+        <textarea class="title-area" id="titleInput" placeholder="Paste paper title here..."></textarea>
+      </div>
+      <div class="field">
+        <div class="label">Abstract <span style="color:var(--text-dim);font-size:10px">(optional)</span></div>
+        <textarea class="abstract-area" id="abstractInput" placeholder="Paste abstract here..."></textarea>
+      </div>
+    </div>
+
+    <!-- Batch mode -->
+    <div id="batchMode" style="display:none">
+      <div class="field">
+        <div class="label">JSON array — each object needs "title", "abstract" is optional</div>
+        <textarea class="batch-area" id="batchInput" placeholder='[
+  {"title": "Attention Is All You Need", "abstract": "We propose..."},
+  {"title": "BERT: Pre-training of Deep Bidirectional Transformers"}
+]'></textarea>
+      </div>
+    </div>
+
+    <button class="run-btn" id="runBtn" onclick="run()">▶ RUN</button>
+  </div>
+
+  <!-- RIGHT: Results panel -->
+  <div class="panel">
+    <div class="label">Results</div>
+    <div class="results-wrap" id="resultsWrap">
+      <div class="empty-state" id="emptyState">
+        <svg width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+          <path d="M9 12h6M9 16h6M7 8h.01M12 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V9l-6-6z"/>
+        </svg>
+        Run inference to see predictions
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  let currentMode = 'single';
+
+  // ── Mode toggle ──
+  function setMode(mode, btn) {
+    currentMode = mode;
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('singleMode').style.display = mode === 'single' ? 'block' : 'none';
+    document.getElementById('batchMode').style.display  = mode === 'batch'  ? 'block' : 'none';
+    clearResults();
+  }
+
+  // ── Health check ──
+  async function checkHealth() {
+    const badge = document.getElementById('healthBadge');
+    const text  = document.getElementById('healthText');
+    const base  = document.getElementById('serverUrl').value.trim();
+    badge.className = 'health-badge';
+    text.textContent = 'checking...';
+    try {
+      const res  = await fetch(`${base}/health`);
+      const data = await res.json();
+      badge.className = 'health-badge ok';
+      text.textContent = `ok · thr=${data.threshold} · ${data.device}`;
+    } catch {
+      badge.className = 'health-badge fail';
+      text.textContent = 'unreachable';
+    }
+  }
+
+  // ── Main run ──
+  async function run() {
+    const btn  = document.getElementById('runBtn');
+    const base = document.getElementById('serverUrl').value.trim();
+
+    btn.disabled = true;
+    btn.classList.add('loading');
+    btn.textContent = '⏳ Running...';
+    clearResults();
+
+    try {
+      if (currentMode === 'single') {
+        await runSingle(base);
+      } else {
+        await runBatch(base);
+      }
+    } catch (err) {
+      showError(err.message);
+    } finally {
+      btn.disabled = false;
+      btn.classList.remove('loading');
+      btn.textContent = '▶ RUN';
+    }
+  }
+
+  async function runSingle(base) {
+    const title    = document.getElementById('titleInput').value.trim();
+    const abstract = document.getElementById('abstractInput').value.trim();
+    if (!title) { showError('Title is required.'); return; }
+
+    const body = { title, abstract };
+
+    const res  = await fetch(`${base}/predict`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(`Server returned ${res.status}`);
+    const data = await res.json();
+    renderCard(data);
+  }
+
+  async function runBatch(base) {
+    const raw = document.getElementById('batchInput').value.trim();
+    let items;
+    try { items = JSON.parse(raw); } catch { throw new Error('Invalid JSON — check the batch input.'); }
+    if (!Array.isArray(items) || !items.length) throw new Error('Input must be a non-empty JSON array.');
+
+    const res = await fetch(`${base}/predict_batch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(items),
+    });
+    if (!res.ok) throw new Error(`Server returned ${res.status}`);
+    const results = await res.json();
+
+    const wrap = document.getElementById('resultsWrap');
+    document.getElementById('emptyState').style.display = 'none';
+
+    const summary = document.createElement('div');
+    summary.className = 'batch-summary';
+    summary.innerHTML = `<span>${results.length}</span> papers tagged`;
+    wrap.appendChild(summary);
+
+    results.forEach(r => renderCard(r, wrap));
+  }
+
+  // ── Render a result card ──
+  function renderCard(data, container) {
+    if (!container) {
+      const wrap = document.getElementById('resultsWrap');
+      document.getElementById('emptyState').style.display = 'none';
+      container = wrap;
+    }
+
+    const card = document.createElement('div');
+    card.className = 'result-card';
+
+    const tagCount = data.predicted_tags.length;
+    card.innerHTML = `
+      <div class="card-header">
+        <span class="title-text">${esc(data.title || '—')}</span>
+        <span>${tagCount} tag${tagCount !== 1 ? 's' : ''}</span>
+      </div>
+      <div class="card-body">
+        <div class="tags-section">
+          <div class="label">Predicted tags</div>
+          <div class="tags-list">${renderTags(data.predicted_tags, data.tag_probabilities)}</div>
+          ${tagCount === 0 ? '<div class="no-tags">No tags above threshold</div>' : ''}
+        </div>
+        ${tagCount > 0 ? `
+        <div>
+          <div class="label">Probabilities</div>
+          <div class="prob-bars">${renderBars(data.tag_probabilities)}</div>
+        </div>` : ''}
+      </div>`;
+
+    container.appendChild(card);
+  }
+
+  function renderTags(tags, probs) {
+    return tags.map(t => `
+      <div class="tag">
+        ${esc(t)}
+        <span class="tag-prob">${(probs[t] * 100).toFixed(1)}%</span>
+      </div>`).join('');
+  }
+
+  function renderBars(probs) {
+    return Object.entries(probs)
+      .sort(([,a],[,b]) => b - a)
+      .map(([name, val]) => `
+        <div class="prob-row">
+          <div class="prob-name" title="${esc(name)}">${esc(name)}</div>
+          <div class="prob-bar-track">
+            <div class="prob-bar-fill" style="width:${(val*100).toFixed(1)}%"></div>
+          </div>
+          <div class="prob-val">${(val*100).toFixed(1)}%</div>
+        </div>`).join('');
+  }
+
+  function showError(msg) {
+    const wrap = document.getElementById('resultsWrap');
+    document.getElementById('emptyState').style.display = 'none';
+    const el = document.createElement('div');
+    el.className = 'error-msg';
+    el.textContent = `Error: ${msg}`;
+    wrap.appendChild(el);
+  }
+
+  function clearResults() {
+    const wrap = document.getElementById('resultsWrap');
+    wrap.innerHTML = '';
+    const empty = document.createElement('div');
+    empty.id = 'emptyState';
+    empty.className = 'empty-state';
+    empty.innerHTML = `
+      <svg width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+        <path d="M9 12h6M9 16h6M7 8h.01M12 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V9l-6-6z"/>
+      </svg>
+      Run inference to see predictions`;
+    wrap.appendChild(empty);
+  }
+
+  function esc(str) {
+    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  // Auto health check on load
+  window.addEventListener('load', checkHealth);
+</script>
+</body>
+</html>
