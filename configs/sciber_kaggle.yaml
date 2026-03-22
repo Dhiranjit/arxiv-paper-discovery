@@ -7,8 +7,8 @@ model:
   pretrained_name: allenai/scibert_scivocab_uncased
 
 data:
-  tokenized_dataset_dir: data/processed/tok_scibert_scivocab_uncased
-  group_to_index_path: data/processed/group_to_index.json
+  tokenized_dataset_dir: /kaggle/input/datasets/dhiranjitdaimary/arxiv-tokenized-dataset/
+  group_to_index_path: group_to_index.json
 
 optimizer:
   lr: 2.0e-05
@@ -20,8 +20,8 @@ scheduler:
   warmup_ratio: 0.1
 
 training:
-  accumulation_steps: 4
-  batch_size: 4
+  accumulation_steps: 1
+  batch_size: 32
   epochs: 3
   primary_metric: f1
   metric_mode: max
