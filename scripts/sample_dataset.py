@@ -7,11 +7,12 @@ Defaults:
 - Total samples: 200000
 
 Examples:
-  python3 scripts/sample_tok_scibert_train_val.py
-  python3 scripts/sample_tok_scibert_train_val.py --num-samples 200000
-  python3 scripts/sample_tok_scibert_train_val.py \
-      --input-dir data/processed/tok_scibert_scivocab_uncased \
-      --output-dir upload/tok_scibert_train_val_200k
+python3 scripts/sample_tok_scibert_train_val.py
+
+python3 scripts/sample_dataset.py \
+--num-samples 300000 \
+--input-dir data/processed/tok_scibert_scivocab_uncased \
+--output-dir upload/tok_scibert_train_val_300k
 """
 
 from __future__ import annotations

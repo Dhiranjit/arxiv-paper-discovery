@@ -1,4 +1,7 @@
-accelerate launch --multi_gpu --num_processes 2 scripts/run_training.py \
+accelerate launch --multi_gpu --num_processes 2 \
+--mixed_precision fp16 \
+--dynamo_backend no \
+scripts/run_training.py \
 --config configs/scibert_kaggle.yaml \
---dataset-path data/processed/tok_scibert_scivocab_uncased \
---output-dir outputs/run_300k
+--dataset-path /kaggle/input/datasets/dhiranjitdaimary/arxiv-tokenized-dataset/upload/tok_scibert_train_val_200k \
+--output-dir /kaggle/working/saved_models/run_300k

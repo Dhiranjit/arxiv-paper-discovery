@@ -7,7 +7,7 @@ model:
 
 training:
   threshold: 0.35
-  sample_ratio: 0.135
+  sample_ratio: null
 
 trainer:
   run_name: scibert_classification
