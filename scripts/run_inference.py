@@ -24,7 +24,7 @@ Usage examples
 --------------
 # From a HuggingFace dataset split saved to disk:
 python scripts/batch_infer.py \
-    --checkpoint saved_models/my_run/best \
+    --checkpoint saved_models/my_run \
     --input-hf   data/processed/arxiv_taxonomy_dataset \
     --split      test \
     --output     outputs/test_predictions.jsonl \
@@ -34,7 +34,7 @@ python scripts/batch_infer.py \
 
 # From a raw JSONL file:
 python scripts/batch_infer.py \
-    --checkpoint saved_models/my_run/best \
+    --checkpoint saved_models/my_run \
     --input-jsonl data/raw/papers.jsonl \
     --output      outputs/papers_tagged.jsonl \
     --limit       200
@@ -68,9 +68,9 @@ RESET  = "\033[0m"
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _decode_multihot(multihot: list[int], index_to_class: dict[int, str]) -> list[str]:
+def _decode_multihot(multihot: list[int | float], index_to_class: dict[int, str]) -> list[str]:
     """Convert a multi-hot binary vector to a list of class name strings."""
-    return [index_to_class[i] for i, val in enumerate(multihot) if val == 1]
+    return [index_to_class[i] for i, val in enumerate(multihot) if float(val) > 0.5]
 
 
 def _load_hf_split(dataset_dir: Path, split: str) -> Dataset:
@@ -137,7 +137,7 @@ def _extract_true_tags(record: dict, index_to_class: dict[int, str]) -> list[str
     labels = record.get("labels")
     if labels is None or not isinstance(labels, list):
         return None
-    if not all(isinstance(x, int) for x in labels):
+    if not all(isinstance(x, (int, float)) for x in labels):
         return None
     if len(labels) != len(index_to_class):
         return None
@@ -155,7 +155,7 @@ def main() -> None:
 
     parser.add_argument(
         "--checkpoint", type=Path, required=True,
-        help="Path to the best/ checkpoint directory (contains model.pth + config.yaml).",
+        help="Path to a Hugging Face model directory saved via save_pretrained().",
     )
 
     input_group = parser.add_mutually_exclusive_group(required=True)
@@ -186,7 +186,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--threshold", type=float, default=None,
-        help="Override the sigmoid threshold from config (default: use config value).",
+        help="Override sigmoid threshold (default: use model config threshold).",
     )
 
     args = parser.parse_args()

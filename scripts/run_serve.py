@@ -25,7 +25,7 @@ serve.run(...)         → deploys the actor and starts accepting traffic.
 Usage
 -----
 # Start the server (blocks until Ctrl-C):
-python scripts/serve.py --checkpoint saved_models/my_run/best
+python scripts/serve.py --checkpoint saved_models/my_run
 
 # Open the dashboard in a browser:
 open http://localhost:8000/
@@ -172,7 +172,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--checkpoint", type=Path, required=True,
-        help="Path to the best/ checkpoint directory (model.pth + config.yaml).",
+        help="Path to a Hugging Face model directory saved via save_pretrained().",
     )
     parser.add_argument(
         "--host", type=str, default="127.0.0.1",
@@ -188,7 +188,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--threshold", type=float, default=None,
-        help="Override sigmoid threshold from config.",
+        help="Override sigmoid threshold from model config.",
     )
     args = parser.parse_args()
 

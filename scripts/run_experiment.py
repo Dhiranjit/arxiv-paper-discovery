@@ -2,6 +2,14 @@
 Grid search over hyperparameters defined in the sweep section of a YAML config.
 
 Each combination mutates a copy of config and calls train(config) directly.
+No model weights are saved — only sweep_summary.json with params and metrics
+for every run. To train a final model, re-run the best config with run_training.py.
+
+Usage:
+    python scripts/run_experiment.py \\
+        --config configs/scibert.yaml \\
+        --dataset-path data/processed/tok_scibert_scivocab_uncased \\
+        --output-dir outputs/sweep_01
 """
 
 import argparse
@@ -30,28 +38,14 @@ def _set_nested(cfg: dict[str, Any], dotted_key: str, value: Any) -> None:
     cursor[keys[-1]] = value
 
 
-def _slugify(value: Any) -> str:
-    """Convert sweep values to filesystem-safe fragments."""
-    text = str(value).strip()
-    return re.sub(r"[^a-zA-Z0-9._-]+", "-", text)
-
-
 def _make_run_id(param_combo: dict[str, Any]) -> str:
     """Build a short, readable run-id from the sampled param values."""
+    slugify = lambda v: re.sub(r"[^a-zA-Z0-9._-]+", "-", str(v).strip())
     parts = []
     for key, val in param_combo.items():
-        short_key = _slugify(key.split(".")[-1])  # e.g. "learning-rate" from "trainer.learning_rate"
-        parts.append(f"{short_key}-{_slugify(val)}")
+        short_key = slugify(key.split(".")[-1])  # e.g. "learning-rate" from "trainer.learning_rate"
+        parts.append(f"{short_key}-{slugify(val)}")
     return "grid_" + "_".join(parts)
-
-
-def _validate_sweep(sweep_params: dict[str, Any]) -> None:
-    """Fail fast when sweep values are not list-like parameter choices."""
-    for key, values in sweep_params.items():
-        if not isinstance(values, list) or len(values) == 0:
-            raise ValueError(
-                f"Sweep parameter '{key}' must be a non-empty list, got {type(values).__name__}."
-            )
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +73,11 @@ def main() -> None:
             "No 'sweep' section found in the config. "
             "Add a sweep block or use run_training.py directly for a single run."
         )
-    _validate_sweep(sweep_params)
+    for key, values in sweep_params.items():
+        if not isinstance(values, list) or len(values) == 0:
+            raise ValueError(
+                f"Sweep parameter '{key}' must be a non-empty list, got {type(values).__name__}."
+            )
 
     base_output_dir = cli_args.output_dir
     param_names  = list(sweep_params.keys())
@@ -111,12 +109,11 @@ def main() -> None:
         cfg["trainer"]["run_name"] = run_id
         cfg.setdefault("experiment", {})
         cfg["experiment"]["name"] = run_id
-        cfg.setdefault("training", {})
-        cfg["training"]["resume_from_checkpoint"] = None
 
         run_output_dir = base_output_dir / run_id
         try:
-            results = train(cfg, dataset_path=cli_args.dataset_path, output_dir=run_output_dir)
+            results = train(cfg, dataset_path=cli_args.dataset_path, output_dir=run_output_dir,
+                            save_model=False)
             best    = results.get("best_metrics", {})
             all_results.append({"run_id": run_id, "params": param_combo, "best_metrics": best})
         except Exception as e:

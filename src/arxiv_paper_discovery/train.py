@@ -66,6 +66,8 @@ def train(
     config: dict[str, Any],
     dataset_path: Path | str,
     output_dir: Path | str,
+    resume_from_checkpoint: Path | str | None = None,
+    save_model: bool = True,
 ) -> dict[str, dict[str, float]]:
     """
     Run training directly from config.
@@ -97,9 +99,11 @@ def train(
     trainer_kwargs.setdefault("data_seed", seed)
     trainer_kwargs.setdefault("label_names", ["labels"])
     trainer_kwargs.setdefault("remove_unused_columns", True)
+    if not save_model:
+        trainer_kwargs["save_strategy"] = "no"
+        trainer_kwargs["load_best_model_at_end"] = False
 
     threshold = float(training_cfg.get("threshold", 0.5))
-    resume_from_checkpoint = training_cfg.get("resume_from_checkpoint")
 
     dataset = load_from_disk(str(dataset_path))
     train_dataset = dataset["train"]
@@ -124,7 +128,7 @@ def train(
         raise ValueError("Train split is empty.")
 
     first_labels = train_dataset[0].get("labels")
-    if not isinstance(first_labels, list) or len(first_labels) == 0:
+    if first_labels is None or len(first_labels) == 0:
         raise ValueError("Expected train dataset items to contain non-empty list field: labels")
 
     num_labels = len(first_labels)
@@ -138,7 +142,13 @@ def train(
     id2label = {idx: name for idx, name in enumerate(label_names)}
 
     tokenizer = AutoTokenizer.from_pretrained(pretrained_name)
-    data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
+    _base_collator = DataCollatorWithPadding(tokenizer=tokenizer)
+
+    def data_collator(features):
+        batch = _base_collator(features)
+        if "labels" in batch:
+            batch["labels"] = batch["labels"].float()
+        return batch
 
     model_config = AutoConfig.from_pretrained(
         pretrained_name,
@@ -165,7 +175,7 @@ def train(
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         data_collator=data_collator,
         compute_metrics=build_compute_metrics(threshold),
     )
@@ -180,7 +190,7 @@ def train(
     trainer.log_metrics("eval", eval_metrics)
     trainer.save_metrics("eval", eval_metrics)
 
-    if trainer.is_world_process_zero():
+    if save_model and trainer.is_world_process_zero():
         trainer.save_model()
         tokenizer.save_pretrained(training_args.output_dir)
 

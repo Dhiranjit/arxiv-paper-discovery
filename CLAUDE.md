@@ -14,8 +14,8 @@ and quantitative research areas.
 
 Runs in two environments:
 
-- **Local machine** — default paths in config
-- **Kaggle / Google Colab** — alternate config with notebook-friendly settings
+- **Local machine** — paths passed via CLI, default batch/precision settings in config
+- **Kaggle / Google Colab** — same config, adjust `fp16` and `per_device_train_batch_size` for GPU
 
 Logging is **notebook-friendly and toggleable** — `tqdm` renders poorly in notebook commit runs.
 Dependencies and packaging are managed through `pyproject.toml`.
@@ -56,10 +56,10 @@ scripts/
     04_tokenize_dataset.py            # tokenize title+abstract and save Arrow dataset
     run_training.py                   # single training run from YAML config
     run_experiment.py                 # grid search over config sweep parameters
-    eval_test_set.py                  # evaluate trained model on test split
-    batch_infer.py                    # offline inference on JSONL or HF dataset
-    serve.py                          # FastAPI + Ray Serve online inference service
-    sample_tok_scibert_train_val.py   # create small dataset samples for experiments/uploads
+    run_eval.py                       # evaluate trained model on test split
+    run_inference.py                  # offline batch inference on JSONL or HF dataset
+    run_serve.py                      # FastAPI + Ray Serve online inference service
+    sample_dataset.py                 # create small dataset samples for experiments/uploads
 
 src/arxiv_paper_discovery/
     config.py                         # project-wide constants and path helpers
@@ -78,8 +78,8 @@ src/arxiv_paper_discovery/
 Configs are the **primary source of truth** for experiment settings — model name, training
 parameters, classification thresholds, and hyperparameter sweeps.
 
-The exception is **dataset path and model output directory**: these are always passed via CLI
-so the same config works across local and Kaggle/Colab environments without modification.
+The exception is **environment-specific paths**: these are always passed via CLI so the same
+config works across local and Kaggle/Colab environments without modification.
 
 ---
 
@@ -90,6 +90,7 @@ provided as CLI arguments**, never stored in config:
 
 - `--dataset-path` — path to the tokenized HuggingFace dataset
 - `--output-dir` — directory for saved model and artifacts
+- `--resume-dir` — checkpoint directory to resume from (optional; `run_training.py` only)
 
 ---
 
@@ -97,7 +98,7 @@ provided as CLI arguments**, never stored in config:
 
 Training scripts should be launched with **Accelerate**.
 
-In Kaggle/Colab environments, set `fp16: true` and increase `per_device_train_batch_size` in the config:
+Example (local):
 
 ```bash
 accelerate launch scripts/run_training.py \

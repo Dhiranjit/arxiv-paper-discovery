@@ -20,10 +20,10 @@ Output:
 - `tokenization_meta.json` inside output directory
 
 Example usage:
-    python scripts/04_tokenize_dataset.py \
-        --config configs/scibert_classification.yaml \
-        --dataset-path data/processed/arxiv_taxonomy_dataset \
-        --output-dir data/processed/tok_scibert_scivocab_uncased
+python scripts/04_tokenize_dataset.py \
+--config configs/scibert.yaml \
+--dataset-path data/processed/arxiv_taxonomy_dataset \
+--output-dir data/processed/tok_scibert_scivocab_uncased
 """
 
 

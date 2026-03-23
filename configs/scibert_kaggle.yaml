@@ -8,14 +8,14 @@ model:
 training:
   threshold: 0.35
   sample_ratio: 0.135
-  
+
 trainer:
   run_name: scibert_classification
 
   num_train_epochs: 3
-  per_device_train_batch_size: 4   # increase to 24 on Kaggle/Colab with GPU
-  per_device_eval_batch_size: 4
-  gradient_accumulation_steps: 4   # reduce to 3 on Kaggle/Colab to keep effective batch size consistent
+  per_device_train_batch_size: 28
+  per_device_eval_batch_size: 28
+  gradient_accumulation_steps: 3
   learning_rate: 2.0e-05
   weight_decay: 0.01
   optim: adamw_torch
@@ -35,8 +35,8 @@ trainer:
   greater_is_better: true
 
   report_to: ["none"]
-  disable_tqdm: false
-  fp16: true   # set to true on Kaggle/Colab with GPU for mixed-precision training
+  disable_tqdm: true
+  fp16: true
   bf16: false
 
 sweep:
