@@ -193,9 +193,6 @@ GROUPS: list[str] = sorted({
 })
 
 GROUP_TO_IDX: dict[str, int] = {g: i for i, g in enumerate(GROUPS)}
-NUM_CLASSES = len(GROUPS)
-
-GROUP_TO_IDX: dict[str, int] = {g: i for i, g in enumerate(GROUPS)}
 NUM_CLASSES = len(GROUPS)  # 23 — fits under target; expand cs.other if signal warrants it
 
 

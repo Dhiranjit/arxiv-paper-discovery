@@ -19,7 +19,6 @@ Run:
 - `python scripts/03_build_taxonomy_dataset.py --seed 42`
 """
 
-import os
 import json
 import argparse
 from pathlib import Path
@@ -30,13 +29,13 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 
 from datasets import load_from_disk, DatasetDict
 
-from arxiv_paper_discovery.label_taxnomy import labels_to_multihot, GROUP_TO_IDX
+from arxiv_paper_discovery.label_taxonomy import labels_to_multihot, GROUP_TO_IDX
 from arxiv_paper_discovery.config import BASE_DATA_PATH, PROCESSED_DATA_DIR
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--seed", default=42)
+    parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
 
 def apply_taxonomy(batch):

@@ -1,19 +1,7 @@
 """
 Grid search over hyperparameters defined in the sweep section of a YAML config.
 
-Usage
------
-    python scripts/run_experiment.py --config configs/scibert_classification.yaml
-
-Sweep config format (added to the same YAML or a separate file)
----------------------------------------------------------------
-sweep:
-  optimizer.lr:     [1e-5, 3e-5, 4e-5, 1e-4]
-  model.dropout_p:  [0.1, 0.3, 0.5]
-
-All combinations are run in sequence.  Results are collected in memory and a
-summary table is printed at the end.  Each run writes its own train_history.json
-and results.json under saved_models/<run-id>/.
+Each combination mutates a copy of config and calls train(config) directly.
 """
 
 import argparse
@@ -27,13 +15,14 @@ from typing import Any
 
 import yaml
 
+from arxiv_paper_discovery.train import train
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 def _set_nested(cfg: dict[str, Any], dotted_key: str, value: Any) -> None:
-    """Write a value into a nested dict using a dotted key, e.g. 'optimizer.lr'."""
+    """Write a value into a nested dict using a dotted key, e.g. 'trainer.learning_rate'."""
     keys   = dotted_key.split(".")
     cursor = cfg
     for key in keys[:-1]:
@@ -51,7 +40,7 @@ def _make_run_id(param_combo: dict[str, Any]) -> str:
     """Build a short, readable run-id from the sampled param values."""
     parts = []
     for key, val in param_combo.items():
-        short_key = _slugify(key.split(".")[-1])  # e.g. "lr" from "optimizer.lr"
+        short_key = _slugify(key.split(".")[-1])  # e.g. "learning-rate" from "trainer.learning_rate"
         parts.append(f"{short_key}-{_slugify(val)}")
     return "grid_" + "_".join(parts)
 
@@ -71,23 +60,14 @@ def _validate_sweep(sweep_params: dict[str, Any]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Grid search for SciBERT classifier")
-    parser.add_argument("--config",   type=Path, default=Path("configs/scibert_classification.yaml"),
-                        help="Training config YAML (must contain a 'sweep' section)")
-    parser.add_argument("--save-dir", type=Path, default=Path("saved_models"))
-    parser.add_argument("--no-save",  action="store_true",
-                        help="Disable checkpointing for all runs (dry-run / quick test)")
     parser.add_argument(
-        "--tokenized-data-dir",
+        "--config",
         type=Path,
-        default=None,
-        help="Path to tokenized dataset directory (overrides config/default for all runs)",
+        default=Path("configs/scibert.yaml"),
+        help="Training config YAML (must contain a 'sweep' section)",
     )
-    parser.add_argument(
-        "--label-map-path",
-        type=Path,
-        default=None,
-        help="Path to group_to_index.json (overrides config/default for all runs)",
-    )
+    parser.add_argument("--dataset-path", type=Path, required=True, help="Path to tokenized HF dataset")
+    parser.add_argument("--output-dir", type=Path, required=True, help="Base directory for sweep run outputs")
     cli_args = parser.parse_args()
 
     with open(cli_args.config) as f:
@@ -101,12 +81,10 @@ def main() -> None:
         )
     _validate_sweep(sweep_params)
 
+    base_output_dir = cli_args.output_dir
     param_names  = list(sweep_params.keys())
     param_values = list(sweep_params.values())
     total_combos = math.prod(len(values) for values in param_values)
-
-    # Import lazily so --help and static config checks do not require heavy training deps.
-    from run_training import execute_training_run  # reuse the same core function
 
     print(f"\n{'='*60}")
     print(f"Grid search: {total_combos} combinations")
@@ -128,19 +106,17 @@ def main() -> None:
         for key, val in param_combo.items():
             _set_nested(cfg, key, val)
 
-        # Build a minimal args namespace matching what execute_training_run expects
-        args = argparse.Namespace(
-            config             = cli_args.config,
-            run_id             = run_id,
-            no_save            = cli_args.no_save,
-            resume             = None,
-            save_dir           = cli_args.save_dir,
-            tokenized_data_dir = cli_args.tokenized_data_dir,
-            label_map_path     = cli_args.label_map_path,
-        )
+        # Mutate config directly per run.
+        cfg.setdefault("trainer", {})
+        cfg["trainer"]["run_name"] = run_id
+        cfg.setdefault("experiment", {})
+        cfg["experiment"]["name"] = run_id
+        cfg.setdefault("training", {})
+        cfg["training"]["resume_from_checkpoint"] = None
 
+        run_output_dir = base_output_dir / run_id
         try:
-            results = execute_training_run(args, cfg)
+            results = train(cfg, dataset_path=cli_args.dataset_path, output_dir=run_output_dir)
             best    = results.get("best_metrics", {})
             all_results.append({"run_id": run_id, "params": param_combo, "best_metrics": best})
         except Exception as e:
@@ -151,8 +127,13 @@ def main() -> None:
     print(f"\n{'='*60}")
     print("Grid search complete\n")
 
-    primary_metric = full_cfg.get("training", {}).get("primary_metric", "f1")
-    metric_mode    = full_cfg.get("training", {}).get("metric_mode", "max")
+    trainer_cfg = full_cfg.get("trainer", {})
+    target_metric = str(trainer_cfg.get("metric_for_best_model", "eval_f1"))
+    if target_metric.startswith("eval_"):
+        primary_metric = target_metric[len("eval_") :]
+    else:
+        primary_metric = target_metric
+    metric_mode = "max" if bool(trainer_cfg.get("greater_is_better", True)) else "min"
 
     scored = [
         r for r in all_results
@@ -174,8 +155,8 @@ def main() -> None:
         print(f"  metrics: {best_run['best_metrics']}")
 
     # Persist sweep summary even if runs fail (useful for debugging failed sweeps)
-    summary_path = cli_args.save_dir / "sweep_summary.json"
-    cli_args.save_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = base_output_dir / "sweep_summary.json"
+    base_output_dir.mkdir(parents=True, exist_ok=True)
     with open(summary_path, "w") as f:
         json.dump(all_results, f, indent=2)
     print(f"\nSummary written → {summary_path}")

@@ -1,51 +1,45 @@
 """
-src/arxiv_paper_discovery/predictor.py
+Persistent inference engine for multi-label arXiv paper tagging.
 
-Persistent inference engine for multi-label arxiv paper tagging.
-Loads model weights once and exposes a fast .predict() method.
-
-Checkpoint layout expected (saved_models/<run-id>/best/):
-    model.pth      ← state dict only (from _save_best in train.py)
-    config.yaml    ← training config bundled alongside the weights
-    metrics.json   ← best val metrics (informational)
-
-Multi-label note
-----------------
-Training uses BCEWithLogitsLoss, so each class is an independent binary
-decision.  We apply sigmoid + threshold (read from the config) rather than
-softmax + argmax.  A single article can therefore be assigned zero or more
-tags, and the result carries per-class probabilities for every predicted tag.
+Supported model format:
+- Hugging Face save_pretrained() directory containing model + tokenizer files.
 """
 
-import json
+from __future__ import annotations
+
 from pathlib import Path
 
 import torch
-import yaml
-from transformers import BertModel, BertTokenizer
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-from arxiv_paper_discovery.config import PROCESSED_DATA_DIR
 from arxiv_paper_discovery.data import clean_text
-from arxiv_paper_discovery.models import SciBERTClassifier
+from arxiv_paper_discovery.train import read_model_threshold
 
-CYAN  = "\033[96m"
+CYAN = "\033[96m"
 RESET = "\033[0m"
+
+
+def _read_index_to_class(model) -> dict[int, str]:
+    raw_id2label = getattr(model.config, "id2label", None) or {}
+    index_to_class: dict[int, str] = {}
+
+    for raw_idx, raw_name in raw_id2label.items():
+        try:
+            idx = int(raw_idx)
+        except (TypeError, ValueError):
+            continue
+        index_to_class[idx] = str(raw_name)
+
+    if index_to_class:
+        return index_to_class
+
+    num_labels = int(getattr(model.config, "num_labels", 0) or 0)
+    return {i: f"LABEL_{i}" for i in range(num_labels)}
 
 
 class ArticleTagger:
     """
-    Persistent inference engine.  Load once, call .predict() many times.
-
-    Parameters
-    ----------
-    checkpoint_dir : Path
-        Directory produced by _save_best() in train.py, containing
-        model.pth and config.yaml (e.g. saved_models/<run-id>/best/).
-    device : str | None
-        Force a device ('cpu', 'cuda', 'mps').  Auto-detected when None.
-    threshold : float | None
-        Override the classification threshold.  When None the value from
-        config.yaml (training.threshold) is used, falling back to 0.5.
+    Persistent inference engine. Load once, call .predict() many times.
     """
 
     def __init__(
@@ -58,89 +52,40 @@ class ArticleTagger:
         print(f"{CYAN}Inference engine initialising on: {self.device.upper()}{RESET}")
 
         checkpoint_dir = Path(checkpoint_dir)
-        model_path  = checkpoint_dir / "model.pth"
-        config_path = checkpoint_dir / "config.yaml"
+        self.tokenizer = AutoTokenizer.from_pretrained(checkpoint_dir)
+        self.model = AutoModelForSequenceClassification.from_pretrained(checkpoint_dir).to(self.device)
 
-        if not model_path.exists():
-            raise FileNotFoundError(
-                f"model.pth not found in '{checkpoint_dir}'. "
-                "Point --checkpoint at a best/ directory produced by training."
-            )
-        if not config_path.exists():
-            raise FileNotFoundError(
-                f"config.yaml not found in '{checkpoint_dir}'. "
-                "The best/ checkpoint should contain a bundled config."
-            )
+        self.index_to_class = _read_index_to_class(self.model)
+        self.threshold = read_model_threshold(self.model, threshold)
 
-        with open(config_path) as f:
-            self.cfg = yaml.safe_load(f)
-
-        model_cfg      = self.cfg["model"]
-        train_cfg      = self.cfg.get("training", {})
-        self.threshold = threshold if threshold is not None else train_cfg.get("threshold", 0.5)
-
-        print(f"{CYAN}Loading weights from : {model_path}{RESET}")
+        print(f"{CYAN}Loaded HF model from: {checkpoint_dir}{RESET}")
         print(f"{CYAN}Classification threshold : {self.threshold}{RESET}")
-
-        # Label mapping: index → class name
-        with open(PROCESSED_DATA_DIR / "group_to_index.json") as f:
-            group_to_index = json.load(f)
-        self.index_to_class: dict[int, str] = {v: k for k, v in group_to_index.items()}
-
-        # Tokenizer
-        self.tokenizer = BertTokenizer.from_pretrained(model_cfg["pretrained_name"])
-
-        # Model
-        scibert = BertModel.from_pretrained(model_cfg["pretrained_name"])
-        self.model = SciBERTClassifier(
-            llm=scibert,
-            dropout_p=model_cfg["dropout_p"],
-            num_classes=len(self.index_to_class),
-        ).to(self.device)
-
-        state_dict = torch.load(model_path, map_location=self.device, weights_only=True)
-        self.model.load_state_dict(state_dict)
         self.model.eval()
         print(f"{CYAN}Model ready.{RESET}")
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
 
     @torch.inference_mode()
     def predict(
         self,
-        title:       str | list[str],
-        abstract:    str | list[str] = "",
+        title: str | list[str],
+        abstract: str | list[str] = "",
     ) -> dict | list[dict]:
         """
-        Tag one or more arxiv papers.
-
-        Parameters
-        ----------
-        title    : single string or list of strings
-        abstract : single string, list of strings, or "" for all
-
-        Returns
-        -------
-        Single dict when title is a str, list of dicts otherwise.
-        Each dict contains:
-            tags          : list[str]   — predicted class names (may be empty)
-            probabilities : dict[str, float] — sigmoid score for every predicted tag
-            text          : str         — cleaned input text fed to the model
+        Tag one or more arXiv papers.
         """
         is_single = isinstance(title, str)
 
-        titles    = [title]    if is_single else list(title)
+        titles = [title] if is_single else list(title)
         abstracts = [abstract] if is_single else (
             [abstract] * len(titles) if isinstance(abstract, str) else list(abstract)
         )
 
-        raw_texts     = [f"{t} {a}".strip() for t, a in zip(titles, abstracts)]
-        cleaned_texts = [clean_text(t) for t in raw_texts]
+        cleaned_titles = [clean_text(t) for t in titles]
+        cleaned_abstracts = [clean_text(a) for a in abstracts]
+        cleaned_texts = [f"{t} {a}".strip() for t, a in zip(cleaned_titles, cleaned_abstracts)]
 
         inputs = self.tokenizer(
-            cleaned_texts,
+            cleaned_titles,
+            cleaned_abstracts,
             padding=True,
             truncation=True,
             max_length=512,
@@ -148,20 +93,24 @@ class ArticleTagger:
         )
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
-        logits = self.model(inputs)                          # (B, num_classes)
-        probs  = torch.sigmoid(logits)                       # independent per class
-        preds  = (probs > self.threshold).int()              # (B, num_classes)
+        logits = self.model(**inputs).logits
+        probs = torch.sigmoid(logits)
+        preds = (probs > self.threshold).int()
 
         results = []
         for i in range(len(cleaned_texts)):
             active_indices = preds[i].nonzero(as_tuple=True)[0].tolist()
-            tags           = [self.index_to_class[idx] for idx in active_indices]
-            tag_probs      = {self.index_to_class[idx]: round(probs[i, idx].item(), 4)
-                              for idx in active_indices}
-            results.append({
-                "tags":          tags,
-                "probabilities": tag_probs,
-                "text":          cleaned_texts[i],
-            })
+            tags = [self.index_to_class.get(idx, f"LABEL_{idx}") for idx in active_indices]
+            tag_probs = {
+                self.index_to_class.get(idx, f"LABEL_{idx}"): round(probs[i, idx].item(), 4)
+                for idx in active_indices
+            }
+            results.append(
+                {
+                    "tags": tags,
+                    "probabilities": tag_probs,
+                    "text": cleaned_texts[i],
+                }
+            )
 
-        return results[0] if is_single else results         
+        return results[0] if is_single else results

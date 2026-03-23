@@ -1,6 +1,4 @@
 import re
-from torch.utils.data import DataLoader
-from transformers import DataCollatorWithPadding
 
 
 def clean_text(text):
@@ -36,15 +34,3 @@ def tokenize_batch(batch, tokenizer):
         max_length=512
     )
 
-def create_dataloader(dataset, tokenizer, batch_size, shuffle=True):
-    """Creates a DataLoader with dynamic padding from a formatted HF dataset."""
-
-    collator = DataCollatorWithPadding(tokenizer=tokenizer)
-
-    dataloader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        collate_fn=collator
-    )
-    return dataloader

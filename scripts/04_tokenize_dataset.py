@@ -2,33 +2,32 @@
 Tokenize the taxonomy dataset and save a PyTorch-ready Hugging Face dataset.
 
 This script:
-1. Resolves tokenizer name from CLI or a YAML config file.
-2. Loads the taxonomy train/val/test dataset from disk.
+1. Resolves tokenizer name from a YAML config file (required).
+2. Loads the taxonomy train/val/test dataset from disk (path required via CLI).
 3. Tokenizes `title` + `abstract` as paired inputs.
 4. Removes raw text/metadata columns after tokenization.
 5. Sets PyTorch tensor formatting for training and evaluation.
 6. Saves the tokenized dataset to a model-specific output directory.
 7. Writes tokenization metadata for reproducibility.
 
-Input:
-- `data/processed/arxiv_taxonomy_dataset`
-- Config file passed via `--config` (optional, for `model.pretrained_name`)
-- Tokenizer name passed via `--tokenizer-name` (optional override)
+Required arguments:
+- `--config`: Path to YAML config file (must contain `model.pretrained_name`)
+- `--dataset-path`: Path to input dataset directory (HuggingFace format)
+- `--output-dir`: Path to save tokenized dataset
 
 Output:
-- `data/processed/tok_<model_name>`
+- Tokenized dataset at the specified output directory
 - `tokenization_meta.json` inside output directory
 
-Run:
-- `python scripts/04_tokenize_dataset.py --config configs/scibert_classification.yaml`
-- `python scripts/04_tokenize_dataset.py --tokenizer-name allenai/scibert_scivocab_uncased`
-
-- output_dir can also be specified to override default naming:
+Example usage:
+    python scripts/04_tokenize_dataset.py \
+        --config configs/scibert_classification.yaml \
+        --dataset-path data/processed/arxiv_taxonomy_dataset \
+        --output-dir data/processed/tok_scibert_scivocab_uncased
 """
 
 
 import os
-import re
 import json
 import yaml
 import argparse
@@ -48,38 +47,28 @@ from arxiv_paper_discovery.config import PROCESSED_DATA_DIR
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default=None)
-    parser.add_argument("--tokenizer-name", type=str, default=None)
-    parser.add_argument("--output-dir", type=str, default=None)
+    parser.add_argument("--config", type=str, required=True)
+    parser.add_argument("--dataset-path", type=str, required=True, help="Path to the input dataset directory (HuggingFace format)")
+    parser.add_argument("--output-dir", type=str, required=True)
     return parser.parse_args()
 
-def model_name_to_slug(name: str) -> str:
-    """Convert model/tokenizer id to a filesystem-safe directory suffix."""
-    return re.sub(r"[^a-zA-Z0-9._-]+", "-", name.strip())
+# Helper functions removed: tokenizer name is read directly from the provided config
 
-def resolve_tokenizer_name(args) -> str:
-    """Resolve tokenizer name from CLI first, then fallback to config file."""
-    if args.tokenizer_name:
-        return args.tokenizer_name
+def main():
+    args = parse_args()
 
-    if args.config is None:
-        raise ValueError("Provide either --tokenizer-name or --config.")
-
+    # Read tokenizer name from provided config (no CLI override allowed)
     with open(args.config, 'r') as f:
         config = yaml.safe_load(f)
-
     try:
-        return config["model"]["pretrained_name"]
+        tokenizer_name = config["model"]["pretrained_name"]
     except Exception as exc:
         raise ValueError(
             f"Could not read 'model.pretrained_name' from config: {args.config}"
         ) from exc
 
-def main():
-    args = parse_args()
-    tokenizer_name = resolve_tokenizer_name(args)
 
-    dataset_path = PROCESSED_DATA_DIR / "arxiv_taxonomy_dataset"
+    dataset_path = Path(args.dataset_path)
 
     print(f"\n1. Loading category mapped dataset from {dataset_path}...")
     dataset = load_from_disk(dataset_path)
@@ -110,13 +99,9 @@ def main():
         columns=["input_ids", "attention_mask", "token_type_ids", "labels"]
     )
 
-    if args.output_dir:
-        output_dir = Path(args.output_dir)
-    else:
-        model_safe_name = model_name_to_slug(tokenizer_name)
-        output_dir = PROCESSED_DATA_DIR / f"tok_{model_safe_name}"
+    output_dir = Path(args.output_dir)
+    print(f"\n4. Adding tokenizer metadata to dataset info and saving to {output_dir}...")
     
-    print(f"\n4. Saving PyTorch-ready dataset to {output_dir}...")
     tokenized_dataset.save_to_disk(output_dir)
 
     metadata = {

@@ -1,0 +1,47 @@
+experiment:
+  name: scibert_classification
+  seed: 42
+
+model:
+  pretrained_name: allenai/scibert_scivocab_uncased
+  dropout_p: 0.1
+
+training:
+  threshold: 0.35
+  sample_ratio: null
+  resume_from_checkpoint: null
+
+trainer:
+  run_name: scibert_classification
+  overwrite_output_dir: false
+
+  num_train_epochs: 3
+  per_device_train_batch_size: 3    # increase to 24 on Kaggle/Colab with GPU
+  per_device_eval_batch_size: 3
+  gradient_accumulation_steps: 4   # reduce to 3 on Kaggle/Colab to keep effective batch size consistent
+  learning_rate: 2.0e-05
+  weight_decay: 0.01
+  optim: adamw_torch
+  lr_scheduler_type: linear
+  warmup_ratio: 0.1
+
+  logging_strategy: steps
+  logging_steps: 50
+  eval_strategy: steps
+  eval_steps: 6000
+
+  save_strategy: steps
+  save_steps: 6000
+  save_total_limit: 2
+  load_best_model_at_end: true
+  metric_for_best_model: eval_f1
+  greater_is_better: true
+
+  report_to: ["none"]
+  disable_tqdm: false
+  fp16: false   # set to true on Kaggle/Colab with GPU for mixed-precision training
+  bf16: false
+
+sweep:
+  trainer.learning_rate: [1.0e-05, 3.0e-05, 4.0e-05, 1.0e-04]
+  model.dropout_p: [0.1, 0.3, 0.5]

@@ -1,511 +1,195 @@
 """
-src/arxiv_paper_discovery/train.py
-
-Accelerate-backed training loop for multi-label text classification.
-Supports epoch- and step-based checkpointing, best-model saving, and resume.
-
-Checkpoint layout
------------------
-  saved_models/{run-id}/
-    best/               ← inference checkpoint: model.pth + metrics.json + config.yaml
-    last/               ← resumable: accelerator state + resume.json + config.yaml
-    step-{N}/           ← resumable: same layout as last/, written every N opt steps
-    train_history.json  ← per-epoch train/val loss + metrics, appended each epoch
-    results.json        ← best metrics written once training completes
-
-Resumable checkpoints (last/ and step-N/) use accelerator.save_state() which bundles
-the model, optimizer, scheduler, RNG state, and AMP GradScaler in one shot.
-resume.json stores the loop counters needed to continue training:
-  { "epoch": int, "global_step": int, "best_val_metric": float }
-
-best/ uses torch.save(state_dict) only — it is an inference artefact, not resumable.
+Trainer-first training utilities for multi-label text classification.
 """
 
-import json
-import math
-import shutil
-import sys
-from dataclasses import dataclass, field
+from __future__ import annotations
+
 from pathlib import Path
+from typing import Any
 
-import torch
+import numpy as np
 import yaml
-from accelerate import Accelerator
-from torch import nn
-from torch.optim import Optimizer
-from torch.optim.lr_scheduler import LRScheduler
-from torch.utils.data import DataLoader
-from tqdm.auto import tqdm
+from datasets import load_from_disk
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+from transformers import (
+    AutoConfig,
+    AutoModelForSequenceClassification,
+    AutoTokenizer,
+    DataCollatorWithPadding,
+    Trainer,
+    TrainingArguments,
+)
 
-# ANSI COLORS
-GREEN  = "\033[92m"
-YELLOW = "\033[93m"
-CYAN   = "\033[96m"
-RESET  = "\033[0m"
-
-
-# ---------------------------------------------------------------------------
-# CheckpointConfig
-# ---------------------------------------------------------------------------
-
-@dataclass
-class CheckpointConfig:
-    """Bundles all checkpointing knobs so train() doesn't need 6 extra params."""
-    save_dir:          Path | None = None
-    save_best:         bool        = True
-    save_last:         bool        = True
-    every_n_steps:     int | None  = None
-    keep_n_step_ckpts: int         = 1
+from arxiv_paper_discovery.label_taxonomy import GROUPS
+from arxiv_paper_discovery.utils import set_seed
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-def _is_better(current: float, best: float, mode: str) -> bool:
-    return current > best if mode == "max" else current < best
-
-
-def _save_best(
-    accelerator: Accelerator,
-    save_dir: Path,
-    model: nn.Module,
-    metrics: dict,
-    config: dict | None,
-) -> None:
-    """
-    Inference-only checkpoint. Saves model.pth + metrics.json + config.yaml.
-    Not resumable — does not include optimizer/scheduler state.
-    """
-    accelerator.wait_for_everyone()
-    if not accelerator.is_main_process:
-        return
-
-    ckpt_dir = save_dir / "best"
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
-
-    torch.save(accelerator.unwrap_model(model).state_dict(), ckpt_dir / "model.pth")
-
-    with open(ckpt_dir / "metrics.json", "w") as f:
-        json.dump(metrics, f, indent=2)
-
-    if config:
-        with open(ckpt_dir / "config.yaml", "w") as f:
-            yaml.safe_dump(config, f)
-
-    accelerator.print(f"{GREEN}>>> Best checkpoint saved → {ckpt_dir}{RESET}")
+def read_model_threshold(model, override: float | None = None) -> float:
+    """Read the classification threshold from model config, with optional CLI override."""
+    if override is not None:
+        return float(override)
+    task_params = getattr(model.config, "task_specific_params", {}) or {}
+    return float(task_params.get("threshold", 0.5))
 
 
-def _save_resumable(
-    accelerator: Accelerator,
-    save_dir: Path,
-    tag: str,
-    resume_state: dict,
-    config: dict | None,
-    *,
-    keep_last_n: int = 1,
-) -> None:
-    """
-    Resumable checkpoint using accelerator.save_state().
-    Writes to save_dir/tag/ and prunes older step checkpoints if keep_last_n is set.
+def build_compute_metrics(threshold: float):
+    """Return a Trainer-compatible compute_metrics callable for multi-label outputs."""
 
-    resume_state: { "epoch": int, "global_step": int, "best_val_metric": float }
-    keep_last_n:  how many step-N/ directories to keep (only applied to step-* tags).
-                  last/ is always a single overwrite so pruning is not needed there.
-    """
-    accelerator.wait_for_everyone()
+    def compute_metrics(eval_pred) -> dict[str, float]:
+        logits, labels = eval_pred
+        if isinstance(logits, tuple):
+            logits = logits[0]
 
-    ckpt_dir = save_dir / tag
-    accelerator.save_state(output_dir=str(ckpt_dir))
+        probs = 1.0 / (1.0 + np.exp(-logits))
+        preds = (probs > threshold).astype(np.int32)
+        labels = labels.astype(np.int32)
 
-    if accelerator.is_main_process:
-        with open(ckpt_dir / "resume.json", "w") as f:
-            json.dump(resume_state, f, indent=2)
-
-        if config:
-            with open(ckpt_dir / "config.yaml", "w") as f:
-                yaml.safe_dump(config, f)
-
-        accelerator.print(f"{GREEN}>>> Resumable checkpoint '{tag}' saved → {ckpt_dir}{RESET}")
-
-        # Prune old step checkpoints
-        if tag.startswith("step-") and keep_last_n > 0:
-            step_dirs = sorted(
-                save_dir.glob("step-*"),
-                key=lambda p: int(p.name.split("-")[1]),
-            )
-            for old_dir in step_dirs[:-keep_last_n]:
-                shutil.rmtree(old_dir, ignore_errors=True)
-                accelerator.print(f"{YELLOW}>>> Pruned old checkpoint {old_dir.name}{RESET}")
-
-
-def _append_epoch_history(save_dir: Path, record: dict) -> None:
-    """Append one epoch's metrics to train_history.json (list of dicts, one per epoch)."""
-    history_path = save_dir / "train_history.json"
-    history: list[dict] = []
-    if history_path.exists():
-        with open(history_path) as f:
-            history = json.load(f)
-    history.append(record)
-    with open(history_path, "w") as f:
-        json.dump(history, f, indent=2)
-
-
-def _write_results(save_dir: Path, results: dict) -> None:
-    """Write final best metrics to results.json."""
-    with open(save_dir / "results.json", "w") as f:
-        json.dump(results, f, indent=2)
-
-
-def load_checkpoint(accelerator: Accelerator, resume_dir: Path) -> dict:
-    """
-    Restores full training state from a resumable checkpoint directory.
-    Must be called after accelerator.prepare() so all objects are wrapped.
-
-    Returns the resume_state dict:
-        { "epoch": int, "global_step": int, "best_val_metric": float }
-    """
-    resume_json = resume_dir / "resume.json"
-    if not resume_dir.exists():
-        raise FileNotFoundError(f"Checkpoint directory not found: {resume_dir}")
-    if not resume_json.exists():
-        raise FileNotFoundError(
-            f"{resume_dir} does not contain resume.json — "
-            "this looks like a best/ checkpoint which is not resumable. "
-            "Point --resume at a last/ or step-N/ directory instead."
+        precision, recall, f1, _ = precision_recall_fscore_support(
+            labels,
+            preds,
+            average="macro",
+            zero_division=0,
         )
+        accuracy = accuracy_score(labels, preds)
 
-    accelerator.load_state(str(resume_dir))
+        return {
+            "accuracy": float(accuracy),
+            "f1": float(f1),
+            "precision": float(precision),
+            "recall": float(recall),
+        }
 
-    with open(resume_json) as f:
-        resume_state = json.load(f)
+    return compute_metrics
 
-    accelerator.print(
-        f"{CYAN}Resumed from '{resume_dir.name}' "
-        f"(epoch {resume_state['epoch']}, step {resume_state['global_step']}){RESET}"
-    )
-    return resume_state
-
-
-# ---------------------------------------------------------------------------
-# train_step
-# ---------------------------------------------------------------------------
-
-def train_step(
-    model: nn.Module,
-    dataloader: DataLoader,
-    loss_fn: nn.Module,
-    optimizer: Optimizer,
-    accelerator: Accelerator,
-    epoch_index: int,
-    total_epochs: int,
-    scheduler: LRScheduler | None = None,
-    ckpt_cfg: CheckpointConfig | None = None,
-    global_step: int = 0,
-    resume_state: dict | None = None,
-    config: dict | None = None,
-    best_val_metric: float = float("-inf"),
-) -> tuple[float, int]:
-    """
-    Runs one epoch of training.
-
-    When resuming mid-epoch (resume_state contains a global_step that falls
-    inside this epoch), batches up to the already-completed step are skipped
-    via accelerator.skip_first_batches().
-
-    Returns:
-        (avg_train_loss, updated_global_step)
-    """
-    model.train()
-    train_loss = 0.0
-
-    ckpt_cfg = ckpt_cfg or CheckpointConfig()
-
-    # --- Mid-epoch resume: skip batches already seen before the crash ---
-    steps_per_epoch = len(dataloader)
-    accum_steps     = accelerator.gradient_accumulation_steps
-
-    if resume_state is not None:
-        # Must mirror optimizer-step accounting used during training:
-        # one optimizer step is taken at each gradient-sync boundary, i.e. ceil(batches/accum).
-        opt_steps_per_epoch         = math.ceil(steps_per_epoch / accum_steps)
-        steps_before_epoch          = resume_state["epoch"] * opt_steps_per_epoch
-        completed_steps_this_epoch  = resume_state["global_step"] - steps_before_epoch
-        if completed_steps_this_epoch > 0:
-            batches_to_skip = completed_steps_this_epoch * accum_steps
-            dataloader = accelerator.skip_first_batches(dataloader, batches_to_skip)
-            accelerator.print(
-                f"{YELLOW}Skipping {batches_to_skip} batches already trained "
-                f"({completed_steps_this_epoch} opt steps){RESET}"
-            )
-
-    progress_bar = tqdm(
-        dataloader,
-        desc=f"Epoch [{epoch_index + 1}/{total_epochs}]",
-        disable=not accelerator.is_local_main_process,
-        dynamic_ncols=True,
-        leave=False,
-    )
-
-    for batch_idx, batch in enumerate(progress_bar, 1):
-        with accelerator.accumulate(model):
-            optimizer.zero_grad(set_to_none=True)
-
-            y      = batch["labels"].float()
-            y_pred = model(batch)
-            loss   = loss_fn(y_pred, y)
-
-            accelerator.backward(loss)
-
-            if accelerator.sync_gradients:
-                accelerator.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
-            optimizer.step()
-
-            if accelerator.sync_gradients:
-                if scheduler:
-                    scheduler.step()
-                global_step += 1
-
-                # --- Step-level resumable checkpoint ---
-                if (
-                    ckpt_cfg.every_n_steps
-                    and ckpt_cfg.save_dir
-                    and global_step % ckpt_cfg.every_n_steps == 0
-                ):
-                    _save_resumable(
-                        accelerator, ckpt_cfg.save_dir,
-                        tag=f"step-{global_step}",
-                        resume_state={
-                            "epoch":           epoch_index,
-                            "global_step":     global_step,
-                            "best_val_metric": best_val_metric,
-                        },
-                        config=config,
-                        keep_last_n=ckpt_cfg.keep_n_step_ckpts,
-                    )
-
-        train_loss += loss.item()
-        progress_bar.set_postfix(
-            loss=f"{train_loss / batch_idx:.4f}",
-            lr=f"{optimizer.param_groups[0]['lr']:.2e}",
-        )
-
-    return train_loss / len(dataloader), global_step
-
-
-# ---------------------------------------------------------------------------
-# val_step
-# ---------------------------------------------------------------------------
-
-def val_step(
-    model: nn.Module,
-    dataloader: DataLoader,
-    loss_fn: nn.Module,
-    accelerator: Accelerator,
-    metric_fn=None,
-    threshold: float = 0.5,
-) -> tuple[float, dict]:
-    model.eval()
-    val_loss   = 0.0
-    all_preds  = []
-    all_labels = []
-
-    progress_bar = tqdm(
-        dataloader,
-        desc="Validation",
-        disable=not accelerator.is_local_main_process,
-        dynamic_ncols=True,
-        leave=False,
-    )
-
-    with torch.inference_mode():
-        for batch in progress_bar:
-            y      = batch["labels"].float()
-            y_pred = model(batch)
-
-            preds    = (torch.sigmoid(y_pred) > threshold).int()
-            preds, y = accelerator.gather_for_metrics((preds, y))
-
-            all_preds.extend(preds.cpu().numpy())
-            all_labels.extend(y.cpu().numpy())
-
-            val_loss += loss_fn(y_pred, y).item()
-
-    metrics = metric_fn(all_labels, all_preds) if metric_fn is not None else {}
-    return val_loss / len(dataloader), metrics
-
-
-# ---------------------------------------------------------------------------
-# train
-# ---------------------------------------------------------------------------
 
 def train(
-    model: nn.Module,
-    train_dataloader: DataLoader,
-    val_dataloader: DataLoader,
-    optimizer: Optimizer,
-    loss_fn: nn.Module,
-    accelerator: Accelerator,
-    epochs: int,
-    metric_fn,
-    primary_metric: str,
-    scheduler: LRScheduler | None = None,
-    config: dict | None = None,
-    mode: str = "max",
-    threshold: float = 0.5,
-    ckpt_cfg: CheckpointConfig | None = None,
-    resume_state: dict | None = None,
-) -> dict:
+    config: dict[str, Any],
+    dataset_path: Path | str,
+    output_dir: Path | str,
+) -> dict[str, dict[str, float]]:
     """
-    Full training loop with checkpointing and optional resume.
+    Run training directly from config.
 
-    Checkpointing
-    -------------
-    Controlled entirely via CheckpointConfig:
-      save_best      → best/   (inference, model weights only)
-      save_last      → last/   (resumable, full accelerator state)
-      every_n_steps  → step-N/ (resumable, full accelerator state)
+    Required config sections:
+    - model.pretrained_name
+    - trainer (TrainingArguments kwargs, passed directly)
 
-    Resuming
-    --------
-    Pass the dict returned by load_checkpoint() as resume_state.
-    The loop will start from the correct epoch and skip already-seen batches
-    within a partially-completed epoch.
-
-    History / results
-    -----------------
-    Each epoch appends a record to {save_dir}/train_history.json.
-    Best metrics are written to {save_dir}/results.json at the end.
+    Paths are passed explicitly rather than read from config so the same
+    config file works unchanged across local and Kaggle/Colab environments.
     """
-    ckpt_cfg = ckpt_cfg or CheckpointConfig()
 
-    # --- Restore or initialise loop state ---
-    start_epoch     = resume_state["epoch"]           if resume_state else 0
-    global_step     = resume_state["global_step"]     if resume_state else 0
-    best_val_metric = resume_state["best_val_metric"] if resume_state else (
-        float("-inf") if mode == "max" else float("inf")
-    )
+    experiment_cfg = config.get("experiment") or {}
+    model_cfg = config.get("model") or {}
+    training_cfg = config.get("training") or {}
 
-    best_val_metrics_dict: dict = {}
+    pretrained_name = model_cfg.get("pretrained_name")
+    if not pretrained_name:
+        raise ValueError("Missing required config: model.pretrained_name")
 
-    try:
-        for epoch in range(start_epoch, epochs):
+    seed = int(experiment_cfg.get("seed", 42))
+    set_seed(seed)
 
-            # Pass resume_state only for the first resumed epoch so that
-            # mid-epoch batch-skipping is applied exactly once.
-            step_resume = resume_state if (resume_state and epoch == start_epoch) else None
+    dataset_path = Path(dataset_path)
 
-            # ---- Training ----
-            train_loss, global_step = train_step(
-                model, train_dataloader, loss_fn, optimizer,
-                accelerator, epoch, epochs,
-                scheduler=scheduler,
-                ckpt_cfg=ckpt_cfg,
-                global_step=global_step,
-                resume_state=step_resume,
-                config=config,
-                best_val_metric=best_val_metric,
+    trainer_kwargs = dict(config.get("trainer") or {})
+    trainer_kwargs["output_dir"] = str(output_dir)
+    trainer_kwargs.setdefault("seed", seed)
+    trainer_kwargs.setdefault("data_seed", seed)
+    trainer_kwargs.setdefault("label_names", ["labels"])
+    trainer_kwargs.setdefault("remove_unused_columns", True)
+
+    threshold = float(training_cfg.get("threshold", 0.5))
+    resume_from_checkpoint = training_cfg.get("resume_from_checkpoint")
+
+    dataset = load_from_disk(str(dataset_path))
+    train_dataset = dataset["train"]
+    val_dataset = dataset["val"]
+
+    sample_ratio = training_cfg.get("sample_ratio")
+    if sample_ratio is not None:
+        sample_ratio = float(sample_ratio)
+        if not (0.0 < sample_ratio <= 1.0):
+            raise ValueError("training.sample_ratio must be in the range (0, 1].")
+        if sample_ratio < 1.0:
+            train_limit = max(1, int(len(train_dataset) * sample_ratio))
+            val_limit = max(1, int(len(val_dataset) * sample_ratio))
+            train_dataset = train_dataset.shuffle(seed=seed).select(range(train_limit))
+            val_dataset = val_dataset.shuffle(seed=seed + 1).select(range(val_limit))
+            print(
+                f"Sampled {train_limit} train / {val_limit} val examples "
+                f"({sample_ratio * 100:.0f}%)."
             )
 
-            # ---- Validation ----
-            val_loss, metrics = val_step(
-                model, val_dataloader, loss_fn, accelerator,
-                metric_fn=metric_fn,
-                threshold=threshold,
-            )
+    if len(train_dataset) == 0:
+        raise ValueError("Train split is empty.")
 
-            current_metrics    = {"loss": val_loss, **metrics}
-            fallback           = float("inf") if mode == "min" else float("-inf")
-            current_metric_val = current_metrics.get(primary_metric, fallback)
+    first_labels = train_dataset[0].get("labels")
+    if not isinstance(first_labels, list) or len(first_labels) == 0:
+        raise ValueError("Expected train dataset items to contain non-empty list field: labels")
 
-            # ---- Print ----
-            metrics_str = " | ".join(
-                f"{CYAN}val_{k}:{RESET} {GREEN}{v:.4f}{RESET}"
-                for k, v in metrics.items()
-            )
-            accelerator.print(
-                f"Epoch [{epoch + 1}/{epochs}] "
-                f"{CYAN}train_loss:{RESET} {YELLOW}{train_loss:.4f}{RESET} | "
-                f"{CYAN}val_loss:{RESET} {YELLOW}{val_loss:.4f}{RESET}"
-                + (f" | {metrics_str}" if metrics_str else "")
-            )
+    num_labels = len(first_labels)
+    if len(GROUPS) != num_labels:
+        raise ValueError(
+            f"Dataset label width ({num_labels}) does not match taxonomy size ({len(GROUPS)})."
+        )
+    label_names = list(GROUPS)
 
-            # ---- History ----
-            if accelerator.is_main_process and ckpt_cfg.save_dir:
-                ckpt_cfg.save_dir.mkdir(parents=True, exist_ok=True)
-                _append_epoch_history(
-                    ckpt_cfg.save_dir,
-                    {
-                        "epoch":      epoch + 1,
-                        "train_loss": train_loss,
-                        "val_loss":   val_loss,
-                        **{f"val_{k}": v for k, v in metrics.items()},
-                    },
-                )
+    label2id = {name: idx for idx, name in enumerate(label_names)}
+    id2label = {idx: name for idx, name in enumerate(label_names)}
 
-            # ---- Best-model checkpoint ----
-            if _is_better(current_metric_val, best_val_metric, mode):
-                best_val_metric       = current_metric_val
-                best_val_metrics_dict = {"val_loss": val_loss, **metrics}
+    tokenizer = AutoTokenizer.from_pretrained(pretrained_name)
+    data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
 
-                if ckpt_cfg.save_best and ckpt_cfg.save_dir:
-                    _save_best(
-                        accelerator, ckpt_cfg.save_dir, model,
-                        metrics=best_val_metrics_dict,
-                        config=config,
-                    )
+    model_config = AutoConfig.from_pretrained(
+        pretrained_name,
+        num_labels=num_labels,
+        problem_type="multi_label_classification",
+        label2id=label2id,
+        id2label=id2label,
+    )
+    if model_cfg.get("dropout_p") is not None:
+        model_config.classifier_dropout = float(model_cfg["dropout_p"])
+    task_specific_params = dict(getattr(model_config, "task_specific_params", {}) or {})
+    task_specific_params["threshold"] = threshold
+    model_config.task_specific_params = task_specific_params
 
-            # ---- Last-epoch resumable checkpoint ----
-            if ckpt_cfg.save_last and ckpt_cfg.save_dir:
-                _save_resumable(
-                    accelerator, ckpt_cfg.save_dir,
-                    tag="last",
-                    resume_state={
-                        "epoch":           epoch + 1,
-                        "global_step":     global_step,
-                        "best_val_metric": best_val_metric,
-                    },
-                    config=config,
-                )
-
-    except KeyboardInterrupt:
-        accelerator.print(f"\n{YELLOW}Training interrupted by user.{RESET}")
-        sys.exit(0)
-
-    # ---- Results ----
-    if accelerator.is_main_process and ckpt_cfg.save_dir and best_val_metrics_dict:
-        _write_results(ckpt_cfg.save_dir, best_val_metrics_dict)
-
-    accelerator.print(f"{GREEN}Training complete!{RESET}")
-    return {"best_metrics": best_val_metrics_dict}
-
-
-# ---------------------------------------------------------------------------
-# eval_model
-# ---------------------------------------------------------------------------
-
-def eval_model(
-    model: nn.Module,
-    dataloader: DataLoader,
-    loss_fn: nn.Module,
-    accelerator: Accelerator,
-    metric_fn,
-    threshold: float = 0.5,
-) -> dict:
-    accelerator.print(f"{CYAN}Evaluating model on test set...{RESET}")
-
-    test_loss, metrics = val_step(
-        model, dataloader, loss_fn, accelerator,
-        metric_fn=metric_fn,
-        threshold=threshold,
+    model = AutoModelForSequenceClassification.from_pretrained(
+        pretrained_name,
+        config=model_config,
     )
 
-    metrics_str = " | ".join(
-        f"{CYAN}Test {k}:{RESET} {GREEN}{v:.4f}{RESET}" for k, v in metrics.items()
-    )
-    accelerator.print(
-        f"\n{CYAN}Test Loss:{RESET} {YELLOW}{test_loss:.4f}{RESET} | {metrics_str}\n"
+    training_args = TrainingArguments(**trainer_kwargs)
+
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=val_dataset,
+        tokenizer=tokenizer,
+        data_collator=data_collator,
+        compute_metrics=build_compute_metrics(threshold),
     )
 
-    return {"loss": test_loss, **metrics}
+    train_result = trainer.train(resume_from_checkpoint=resume_from_checkpoint)
+    train_metrics = train_result.metrics
+    trainer.log_metrics("train", train_metrics)
+    trainer.save_metrics("train", train_metrics)
+    trainer.save_state()
+
+    eval_metrics = trainer.evaluate(eval_dataset=val_dataset, metric_key_prefix="eval")
+    trainer.log_metrics("eval", eval_metrics)
+    trainer.save_metrics("eval", eval_metrics)
+
+    if trainer.is_world_process_zero():
+        trainer.save_model()
+        tokenizer.save_pretrained(training_args.output_dir)
+
+        output_dir = Path(training_args.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        with open(output_dir / "run_config.yaml", "w") as f:
+            yaml.safe_dump(config, f, sort_keys=False)
+
+    return {
+        "train_metrics": train_metrics,
+        "best_metrics": eval_metrics,
+    }
