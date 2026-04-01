@@ -9,19 +9,30 @@ Usage:
 accelerate launch scripts/run_training.py \
 --config configs/scibert.yaml \
 --dataset-path data/processed/tok_scibert_scivocab_uncased \
---output-dir outputs/run_01
+--output-dir experiments/run_01 \
+--sample-ratio 0.01
 
-    # Resume from a checkpoint:
+
+# Resume from a checkpoint:
 accelerate launch scripts/run_training.py \
 --config configs/scibert.yaml \
 --dataset-path data/processed/tok_scibert_scivocab_uncased \
---output-dir outputs/run_01 \
---resume-dir outputs/run_01/checkpoint-6000
+--output-dir experiments/run_01 \
+--resume-dir experiments/run_01/checkpoint-6000
+
+
+# Running in Kaggle (multi-GPU):
+accelerate launch \
+--num_processes 2 --num_machines 1 --multi_gpu --mixed_precision fp16 \
+scripts/run_training.py \
+--config configs/scibert_kaggle.yaml \
+--dataset-path /kaggle/input/<your-dataset>/tok_scibert-scivocab-uncased \
+--output-dir /kaggle/working/saved_models
 """
 
-from __future__ import annotations
 
 import argparse
+import logging
 import os
 import warnings
 from pathlib import Path
@@ -34,6 +45,8 @@ from arxiv_paper_discovery.train import train
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 warnings.filterwarnings("ignore", category=FutureWarning)
 hf_logging.set_verbosity_error()
+logging.getLogger("safetensors").setLevel(logging.ERROR)
+logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
 
 
 def main() -> None:
@@ -42,18 +55,22 @@ def main() -> None:
     parser.add_argument("--dataset-path", type=Path, required=True, help="Path to tokenized HF dataset")
     parser.add_argument("--output-dir", type=Path, required=True, help="Directory to save model and artifacts")
     parser.add_argument("--resume-dir", type=Path, default=None, help="Checkpoint directory to resume from (optional)")
+    parser.add_argument("--sample-ratio", type=float, default=None, help="Override config sample_ratio (e.g. 0.01 for quick test)")
     args = parser.parse_args()
 
     with open(args.config) as f:
         cfg = yaml.safe_load(f) or {}
 
+    if args.sample_ratio is not None:
+        cfg.setdefault("training", {})["sample_ratio"] = args.sample_ratio
+
     print(f"Running training with config: {args.config}")
     results = train(cfg, dataset_path=args.dataset_path, output_dir=args.output_dir,
                     resume_from_checkpoint=args.resume_dir)
 
-    best_metrics = results.get("best_metrics", {})
-    if best_metrics:
-        metrics_str = " | ".join(f"{k}: {v:.4f}" for k, v in best_metrics.items())
+    eval_metrics = results.get("eval_metrics", {})
+    if eval_metrics:
+        metrics_str = " | ".join(f"{k}: {v:.4f}" for k, v in eval_metrics.items())
         print(f"\nValidation metrics: {metrics_str}\n")
 
 

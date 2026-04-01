@@ -13,7 +13,6 @@ import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from arxiv_paper_discovery.data import clean_text
-from arxiv_paper_discovery.train import read_model_threshold
 
 CYAN = "\033[96m"
 RESET = "\033[0m"
@@ -56,7 +55,7 @@ class ArticleTagger:
         self.model = AutoModelForSequenceClassification.from_pretrained(checkpoint_dir).to(self.device)
 
         self.index_to_class = _read_index_to_class(self.model)
-        self.threshold = read_model_threshold(self.model, threshold)
+        self.threshold = float(threshold) if threshold is not None else 0.5
 
         print(f"{CYAN}Loaded HF model from: {checkpoint_dir}{RESET}")
         print(f"{CYAN}Classification threshold : {self.threshold}{RESET}")

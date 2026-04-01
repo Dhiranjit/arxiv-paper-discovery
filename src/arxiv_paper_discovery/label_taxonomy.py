@@ -1,12 +1,20 @@
-# label_taxonomy.py
-# Maps raw arXiv labels → 27 grouped categories for multi-label classification.
-# Multi-hot encoding uses the deduplicated group indices.
+"""
+Maps raw arXiv category codes to 25 taxonomy labels for multi-label classification.
 
-from __future__ import annotations
-from typing import Optional
+Exports:
+    CATEGORY_TO_LABEL   dict mapping arXiv category codes to taxonomy label names
+    LABEL_TO_IDX        dict mapping taxonomy label names to class indices
+    IDX_TO_LABEL        dict mapping class indices to taxonomy label names
+    NUM_CLASSES         total number of taxonomy labels (25)
+
+    categories_to_labels(categories)  arXiv codes → label names
+    labels_to_multihot(group_names)   label names → multi-hot vector
+    multihot_to_labels(vec)           multi-hot vector → label names
+"""
+
 
 # fmt: off
-LABEL_TO_GROUP: dict[str, str] = {
+CATEGORY_TO_LABEL: dict[str, str] = {
     # ── Machine Learning ──────────────────────────────────────────────
     "cs.LG": "Machine Learning", "stat.ML": "Machine Learning",
     "cs.AI": "Machine Learning", "cs.DL":   "Machine Learning",
@@ -23,14 +31,16 @@ LABEL_TO_GROUP: dict[str, str] = {
     # ── Security & Cryptography ───────────────────────────────────────
     "cs.CR": "Security and Cryptography",
 
-    # ── Systems & Control ─────────────────────────────────────────────
-    "cs.SY":  "Systems and Control", "eess.SY": "Systems and Control",
-    "eess.SP":"Systems and Control", "eess.IV": "Systems and Control",
-    "eess.AS":"Systems and Control", "cs.DC":   "Systems and Control",
-    "cs.NI":  "Systems and Control", "cs.AR":   "Systems and Control",
-    "cs.PF":  "Systems and Control", "cs.ET":   "Systems and Control",
-    "cs.SC":  "Systems and Control", "cs.OS":   "Systems and Control",
-    "cs.MS":  "Systems and Control",
+    # ── Signal Processing & Control ───────────────────────────────────
+    "cs.SY":  "Signal Processing and Control", "eess.SY": "Signal Processing and Control",
+    "eess.SP":"Signal Processing and Control", "eess.IV": "Signal Processing and Control",
+    "eess.AS":"Signal Processing and Control",
+
+    # ── Computer Systems & Networking ─────────────────────────────────
+    "cs.DC": "Computer Systems and Networking", "cs.NI": "Computer Systems and Networking",
+    "cs.AR": "Computer Systems and Networking", "cs.PF": "Computer Systems and Networking",
+    "cs.ET": "Computer Systems and Networking", "cs.SC": "Computer Systems and Networking",
+    "cs.OS": "Computer Systems and Networking", "cs.MS": "Computer Systems and Networking",
 
     # ── Information Theory ────────────────────────────────────────────
     "cs.IT": "Information Theory", "math.IT": "Information Theory",
@@ -49,10 +59,6 @@ LABEL_TO_GROUP: dict[str, str] = {
     "cs.MA": "CS Theory and Algorithms", "cs.DB": "CS Theory and Algorithms",
     "cs.GR": "CS Theory and Algorithms", "cs.SE": "CS Theory and Algorithms",
     "cs.NE": "CS Theory and Algorithms",
-
-    # ── CS Other ──────────────────────────────────────────────────────
-    "cs.GL": "Computer Science Other", "cs.OH": "Computer Science Other",
-    "comp-gas": "Computer Science Other",
 
     # ── High Energy Physics ───────────────────────────────────────────
     "hep-ph": "High Energy Physics", "hep-th": "High Energy Physics",
@@ -87,25 +93,34 @@ LABEL_TO_GROUP: dict[str, str] = {
     "mtrl-th":            "Condensed Matter Physics",
     "supr-con":           "Condensed Matter Physics",
 
+    # ── Applied & Interdisciplinary Physics ───────────────────────────
+    "physics.bio-ph":  "Applied and Interdisciplinary Physics",
+    "physics.chem-ph": "Applied and Interdisciplinary Physics",
+    "physics.med-ph":  "Applied and Interdisciplinary Physics",
+    "physics.soc-ph":  "Applied and Interdisciplinary Physics",
+    "physics.geo-ph":  "Applied and Interdisciplinary Physics",
+    "physics.ao-ph":   "Applied and Interdisciplinary Physics",
+    "physics.space-ph":"Applied and Interdisciplinary Physics",
+    "physics.data-an": "Applied and Interdisciplinary Physics",
+    "chem-ph": "Applied and Interdisciplinary Physics",
+    "ao-sci":  "Applied and Interdisciplinary Physics",
+
+    # ── Nonlinear Dynamics ────────────────────────────────────────────
+    "nlin.CD":  "Nonlinear Dynamics", "nlin.SI":  "Nonlinear Dynamics",
+    "nlin.PS":  "Nonlinear Dynamics", "nlin.AO":  "Nonlinear Dynamics",
+    "nlin.CG":  "Nonlinear Dynamics", "chao-dyn": "Nonlinear Dynamics",
+    "patt-sol": "Nonlinear Dynamics", "adap-org": "Nonlinear Dynamics",
+
     # ── Physics Other ─────────────────────────────────────────────────
     "physics.optics":   "Physics Other", "physics.flu-dyn":  "Physics Other",
-    "physics.comp-ph":  "Physics Other", "physics.chem-ph":  "Physics Other",
-    "physics.soc-ph":   "Physics Other", "physics.ins-det":  "Physics Other",
+    "physics.comp-ph":  "Physics Other", "physics.ins-det":  "Physics Other",
     "physics.atom-ph":  "Physics Other", "physics.app-ph":   "Physics Other",
-    "physics.bio-ph":   "Physics Other", "physics.plasm-ph": "Physics Other",
-    "physics.data-an":  "Physics Other", "physics.gen-ph":   "Physics Other",
-    "physics.class-ph": "Physics Other", "physics.med-ph":   "Physics Other",
-    "physics.acc-ph":   "Physics Other", "physics.geo-ph":   "Physics Other",
-    "physics.ao-ph":    "Physics Other", "physics.space-ph": "Physics Other",
+    "physics.plasm-ph": "Physics Other", "physics.gen-ph":   "Physics Other",
+    "physics.class-ph": "Physics Other", "physics.acc-ph":   "Physics Other",
     "physics.hist-ph":  "Physics Other", "physics.ed-ph":    "Physics Other",
     "physics.atm-clus": "Physics Other", "physics.pop-ph":   "Physics Other",
-    "nlin.CD":  "Physics Other", "nlin.SI":  "Physics Other",
-    "nlin.PS":  "Physics Other", "nlin.AO":  "Physics Other",
-    "nlin.CG":  "Physics Other", "chao-dyn": "Physics Other",
-    "patt-sol": "Physics Other", "adap-org": "Physics Other",
     "atom-ph":  "Physics Other", "plasm-ph": "Physics Other",
-    "ao-sci":   "Physics Other", "acc-phys": "Physics Other",
-    "chem-ph":  "Physics Other", "funct-an": "Physics Other",
+    "acc-phys": "Physics Other",
 
     # ── Mathematical Physics ──────────────────────────────────────────
     "math.MP": "Mathematical Physics", "math-ph": "Mathematical Physics",
@@ -136,6 +151,7 @@ LABEL_TO_GROUP: dict[str, str] = {
     "math.GM": "Pure Mathematics", "math.HO": "Pure Mathematics",
     "alg-geom": "Pure Mathematics", "q-alg":   "Pure Mathematics",
     "dg-ga":    "Pure Mathematics", "solv-int": "Pure Mathematics",
+    "funct-an": "Pure Mathematics",
 
     # ── Quantitative Biology ──────────────────────────────────────────
     "q-bio.QM": "Quantitative Biology", "q-bio.PE": "Quantitative Biology",
@@ -162,18 +178,18 @@ LABEL_TO_GROUP: dict[str, str] = {
 # fmt: on
 
 # Sorted canonical group list — index = position in multi-hot vector
-GROUPS: list[str] = sorted({
+LABELS: list[str] = sorted({
     # Computer Science
     "Machine Learning",
     "Computer Vision",
     "Natural Language Processing",
     "Robotics",
     "Security and Cryptography",
-    "Systems and Control",
+    "Signal Processing and Control",
+    "Computer Systems and Networking",
     "Information Theory",
     "Human Computer Interaction",
     "CS Theory and Algorithms",
-    "Computer Science Other",
     # Physics
     "High Energy Physics",
     "Quantum Physics",
@@ -181,6 +197,8 @@ GROUPS: list[str] = sorted({
     "Nuclear Physics",
     "Astrophysics",
     "Condensed Matter Physics",
+    "Applied and Interdisciplinary Physics",
+    "Nonlinear Dynamics",
     "Physics Other",
     # Mathematics
     "Mathematical Physics",
@@ -192,30 +210,31 @@ GROUPS: list[str] = sorted({
     "Quantitative Finance and Economics",
 })
 
-GROUP_TO_IDX: dict[str, int] = {g: i for i, g in enumerate(GROUPS)}
-NUM_CLASSES = len(GROUPS)  # 23 — fits under target; expand cs.other if signal warrants it
+LABEL_TO_IDX: dict[str, int] = {g: i for i, g in enumerate(LABELS)}
+IDX_TO_LABEL: dict[int, str] = {i: g for g, i in LABEL_TO_IDX.items()}
+NUM_CLASSES = len(LABELS)  # 25
 
 
-def labels_to_multihot(raw_labels: list[str]) -> list[int]:
-    """Convert a paper's raw arXiv labels to a multi-hot vector.
-
-    Handles:
-    - Unknown labels → silently skipped (maps to nothing, not 'other')
-    - Cross-listed duplicates → deduplicated via set
-    - Returns a dense int list of length NUM_CLASSES
+def categories_to_labels(categories: list[str]) -> list[str]:
     """
-    groups = {
-        LABEL_TO_GROUP[lbl]
-        for lbl in raw_labels
-        if lbl in LABEL_TO_GROUP
-    }
-    vec = [0] * NUM_CLASSES
-    for g in groups:
-        vec[GROUP_TO_IDX[g]] = 1
+    Convert raw arXiv categories to a deduplicated list of taxonomy label names.
+    """
+    return list({CATEGORY_TO_LABEL[cat] for cat in categories if cat in CATEGORY_TO_LABEL})
+
+
+def labels_to_multihot(group_names: list[str]) -> list[float]:
+    """
+    Convert a list of taxonomy group names to a multi-hot vector.
+    Returns a dense float list of length NUM_CLASSES.
+    """
+    vec = [0.0] * NUM_CLASSES
+    for g in group_names:
+        if g in LABEL_TO_IDX:
+            vec[LABEL_TO_IDX[g]] = 1.0
     return vec
 
 
-def multihot_to_groups(vec: list[int]) -> list[str]:
-    """Decode a multi-hot vector back to group names."""
-    return [GROUPS[i] for i, v in enumerate(vec) if v == 1]
+def multihot_to_labels(vec: list[int]) -> list[str]:
+    """Decode a multi-hot vector back to taxonomy group names."""
+    return [LABELS[i] for i, v in enumerate(vec) if v == 1]
 

@@ -15,7 +15,7 @@ trainer:
   num_train_epochs: 3
   per_device_train_batch_size: 4   # increase to 24 on Kaggle/Colab with GPU
   per_device_eval_batch_size: 4
-  gradient_accumulation_steps: 4   # reduce to 3 on Kaggle/Colab to keep effective batch size consistent
+  gradient_accumulation_steps: 4
   learning_rate: 2.0e-05
   weight_decay: 0.01
   optim: adamw_torch
@@ -37,8 +37,8 @@ trainer:
   report_to: ["none"]
   disable_tqdm: false
   fp16: true   # set to true on Kaggle/Colab with GPU for mixed-precision training
-  bf16: false
 
 sweep:
-  trainer.learning_rate: [1.0e-05, 3.0e-05, 4.0e-05, 1.0e-04]
+  trainer.learning_rate: [1.0e-05, 2.0e-05, 3.0e-05, 5.0e-05]
   model.dropout_p: [0.1, 0.3, 0.5]
+  trainer.warmup_ratio: [0.05, 0.1, 0.2]

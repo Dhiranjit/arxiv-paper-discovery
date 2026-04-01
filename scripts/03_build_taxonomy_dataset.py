@@ -3,25 +3,28 @@ Build the taxonomy-labeled train/validation/test dataset from the base ArXiv dat
 
 This script:
 1. Loads the base dataset from disk.
-2. Maps raw ArXiv category tags to project taxonomy multi-hot label vectors.
+2. Maps raw ArXiv category tags to human-readable taxonomy group name lists.
 3. Filters out papers that do not map to any taxonomy group.
 4. Splits data into train/val/test (80/10/10).
-5. Saves the split dataset and taxonomy index mapping for downstream training/inference.
+5. Saves the split dataset for downstream tokenization.
+
+Note: multi-hot encoding is deliberately deferred to 04_tokenize_dataset.py so
+that the taxonomy dataset remains human-readable and inspectable.
 
 Input:
 - `data/base/arxiv_base_dataset`
 
-Outputs:
-- `data/processed/arxiv_taxonomy_dataset`
-- `data/processed/group_to_index.json`
+Output:
+- `data/processed/arxiv_taxonomy_dataset`  (labels column: list of group name strings)
 
 Run:
 - `python scripts/03_build_taxonomy_dataset.py --seed 42`
 """
 
-import json
+import os
 import argparse
-from pathlib import Path
+
+NUM_PROC = min(6, os.cpu_count() or 1)
 
 
 import warnings
@@ -29,7 +32,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 
 from datasets import load_from_disk, DatasetDict
 
-from arxiv_paper_discovery.label_taxonomy import labels_to_multihot, GROUP_TO_IDX
+from arxiv_paper_discovery.label_taxonomy import categories_to_labels
 from arxiv_paper_discovery.config import BASE_DATA_PATH, PROCESSED_DATA_DIR
 
 
@@ -39,13 +42,13 @@ def parse_args():
     return parser.parse_args()
 
 def apply_taxonomy(batch):
-    """Maps raw ArXiv categories to multi-hot encoded taxonomy groups."""
-    batch_labels = [labels_to_multihot(cats) for cats in batch["categories"]]
+    """Maps raw ArXiv categories to taxonomy group name lists."""
+    batch_labels = [categories_to_labels(cats) for cats in batch["categories"]]
     return {"labels": batch_labels}
 
 def has_valid_label(example):
-    """Filters out papers that resulted in a zero-vector (no matching taxonomy groups)."""
-    return sum(example["labels"]) > 0
+    """Filters out papers with no matching taxonomy groups."""
+    return len(example["labels"]) > 0
 
 def main():
     args = parse_args()
@@ -56,19 +59,19 @@ def main():
     print("1. Loading the Base Dataset...")
     dataset = load_from_disk(BASE_DATA_PATH)
 
-    print("\n2. Applying Label Taxonomy (Multi-Hot Encoding)...")
+    print("\n2. Applying Label Taxonomy (Group Name Mapping)...")
     dataset = dataset.map(
         apply_taxonomy,
         batched=True,
-        num_proc=6,
-        desc="Mapping categories to taxonomy"
+        num_proc=NUM_PROC,
+        desc="Mapping categories to taxonomy (labels)"
     )
 
     print("\n3. Filtering dataset to remove out-of-taxonomy papers...")
     original_size = len(dataset)
     dataset = dataset.filter(
         has_valid_label,
-        num_proc=6,
+        num_proc=NUM_PROC,
         desc="Filtering empty labels"
     )
     print(f"   Retained {len(dataset)} / {original_size} papers.")
@@ -91,11 +94,7 @@ def main():
     dataset_path = PROCESSED_DATA_DIR / "arxiv_taxonomy_dataset"
     final_dataset.save_to_disk(dataset_path)
 
-    # Save the mapping reference for the downstream inference/eval
-    with open(PROCESSED_DATA_DIR / "group_to_index.json", 'w') as f:
-        json.dump(GROUP_TO_IDX, f)
-
-    print(f"\nSuccess! Base taxonomy dataset saved to {dataset_path}")
+    print(f"\nSuccess! Taxonomy dataset saved to {dataset_path}")
 
 if __name__ == "__main__":
     main()

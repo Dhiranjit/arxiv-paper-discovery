@@ -10,8 +10,7 @@ __pycache__/
 *.db
 
 /saved_models
-/mlruns
-
-/upload
-
-/outputs
+.codex
+upload/
+.claude/
+CLAUDE.md

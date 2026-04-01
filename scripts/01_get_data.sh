@@ -1,8 +1,8 @@
-# Download the arXiv dataset using the Kaggle API if it has not already been downloaded.
+# Downloads arXiv dataset (Kaggle) into data/raw/
+# Skips download if arxiv-metadata-oai-snapshot.json already exists
 
 
-#!/usr/bin/env bash
-set -e
+set -euo pipefail
 
 DATA_DIR="data/raw"
 DATA_FILE="$DATA_DIR/arxiv/arxiv-metadata-oai-snapshot.json"

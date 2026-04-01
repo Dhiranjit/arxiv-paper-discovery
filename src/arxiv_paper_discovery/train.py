@@ -2,64 +2,50 @@
 Trainer-first training utilities for multi-label text classification.
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+import torch
 import yaml
 from datasets import load_from_disk
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+from functools import partial
+
+from sklearn.metrics import precision_recall_fscore_support
 from transformers import (
     AutoConfig,
     AutoModelForSequenceClassification,
     AutoTokenizer,
     DataCollatorWithPadding,
+    EvalPrediction,
     Trainer,
     TrainingArguments,
 )
 
-from arxiv_paper_discovery.label_taxonomy import GROUPS
+from arxiv_paper_discovery.label_taxonomy import LABELS, LABEL_TO_IDX, IDX_TO_LABEL
 from arxiv_paper_discovery.utils import set_seed
 
 
-def read_model_threshold(model, override: float | None = None) -> float:
-    """Read the classification threshold from model config, with optional CLI override."""
-    if override is not None:
-        return float(override)
-    task_params = getattr(model.config, "task_specific_params", {}) or {}
-    return float(task_params.get("threshold", 0.5))
+def compute_metrics(eval_pred: EvalPrediction, threshold: float = 0.5) -> dict[str, float]:
+    """Trainer-compatible compute_metrics for multi-label outputs."""
+    logits, labels = eval_pred
 
+    probs = 1.0 / (1.0 + np.exp(-logits))
+    preds = (probs > threshold).astype(np.int32)
 
-def build_compute_metrics(threshold: float):
-    """Return a Trainer-compatible compute_metrics callable for multi-label outputs."""
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        labels, preds, average="macro", zero_division=0,
+    )
+    _, _, f1_weighted, _ = precision_recall_fscore_support(
+        labels, preds, average="weighted", zero_division=0,
+    )
 
-    def compute_metrics(eval_pred) -> dict[str, float]:
-        logits, labels = eval_pred
-        if isinstance(logits, tuple):
-            logits = logits[0]
-
-        probs = 1.0 / (1.0 + np.exp(-logits))
-        preds = (probs > threshold).astype(np.int32)
-        labels = labels.astype(np.int32)
-
-        precision, recall, f1, _ = precision_recall_fscore_support(
-            labels,
-            preds,
-            average="macro",
-            zero_division=0,
-        )
-        accuracy = accuracy_score(labels, preds)
-
-        return {
-            "accuracy": float(accuracy),
-            "f1": float(f1),
-            "precision": float(precision),
-            "recall": float(recall),
-        }
-
-    return compute_metrics
+    return {
+        "f1": float(f1),
+        "f1_weighted": float(f1_weighted),
+        "precision": float(precision),
+        "recall": float(recall),
+    }
 
 
 def train(
@@ -72,84 +58,36 @@ def train(
     """
     Run training directly from config.
 
-    Required config sections:
-    - model.pretrained_name
-    - trainer (TrainingArguments kwargs, passed directly)
-
-    Paths are passed explicitly rather than read from config so the same
-    config file works unchanged across local and Kaggle/Colab environments.
+    Required config keys: model.pretrained_name, trainer.*
+    Paths are passed explicitly so the same config works across local and Kaggle environments.
     """
+    # 1. Config
+    pretrained_name = config["model"]["pretrained_name"]
+    seed            = int(config.get("experiment", {}).get("seed", 42))
+    threshold       = float(config.get("training", {}).get("threshold", 0.5))
+    sample_ratio    = config.get("training", {}).get("sample_ratio")
+    dropout_p       = config.get("model", {}).get("dropout_p")
 
-    experiment_cfg = config.get("experiment") or {}
-    model_cfg = config.get("model") or {}
-    training_cfg = config.get("training") or {}
-
-    pretrained_name = model_cfg.get("pretrained_name")
-    if not pretrained_name:
-        raise ValueError("Missing required config: model.pretrained_name")
-
-    seed = int(experiment_cfg.get("seed", 42))
     set_seed(seed)
 
-    dataset_path = Path(dataset_path)
-
-    trainer_kwargs = dict(config.get("trainer") or {})
-    trainer_kwargs["output_dir"] = str(output_dir)
-    trainer_kwargs.setdefault("seed", seed)
-    trainer_kwargs.setdefault("data_seed", seed)
-    trainer_kwargs.setdefault("label_names", ["labels"])
-    trainer_kwargs.setdefault("remove_unused_columns", True)
-    if not save_model:
-        trainer_kwargs["save_strategy"] = "no"
-        trainer_kwargs["load_best_model_at_end"] = False
-
-    threshold = float(training_cfg.get("threshold", 0.5))
-
+    # 2. Dataset
     dataset = load_from_disk(str(dataset_path))
-    train_dataset = dataset["train"]
-    val_dataset = dataset["val"]
+    train_ds, val_ds = dataset["train"], dataset["val"]
 
-    sample_ratio = training_cfg.get("sample_ratio")
-    if sample_ratio is not None:
+
+    if sample_ratio is not None and float(sample_ratio) < 1.0:
         sample_ratio = float(sample_ratio)
-        if not (0.0 < sample_ratio <= 1.0):
-            raise ValueError("training.sample_ratio must be in the range (0, 1].")
-        if sample_ratio < 1.0:
-            train_limit = max(1, int(len(train_dataset) * sample_ratio))
-            val_limit = max(1, int(len(val_dataset) * sample_ratio))
-            train_dataset = train_dataset.shuffle(seed=seed).select(range(train_limit))
-            val_dataset = val_dataset.shuffle(seed=seed + 1).select(range(val_limit))
-            print(
-                f"Sampled {train_limit} train / {val_limit} val examples "
-                f"({sample_ratio * 100:.0f}%)."
-            )
+        train_ds = train_ds.shuffle(seed=seed).select(range(int(len(train_ds) * sample_ratio)))
+        val_ds   = val_ds.shuffle(seed=seed + 1).select(range(int(len(val_ds) * sample_ratio)))
+        print(f"Sampled {len(train_ds)} train / {len(val_ds)} val examples ({sample_ratio * 100:.0f}%).")
 
-    if len(train_dataset) == 0:
-        raise ValueError("Train split is empty.")
+    # 3. Labels — LABELS is the source of truth
+    num_labels  = len(LABELS)
+    label2id    = LABEL_TO_IDX
+    id2label    = IDX_TO_LABEL
 
-    first_labels = train_dataset[0].get("labels")
-    if first_labels is None or len(first_labels) == 0:
-        raise ValueError("Expected train dataset items to contain non-empty list field: labels")
-
-    num_labels = len(first_labels)
-    if len(GROUPS) != num_labels:
-        raise ValueError(
-            f"Dataset label width ({num_labels}) does not match taxonomy size ({len(GROUPS)})."
-        )
-    label_names = list(GROUPS)
-
-    label2id = {name: idx for idx, name in enumerate(label_names)}
-    id2label = {idx: name for idx, name in enumerate(label_names)}
-
-    tokenizer = AutoTokenizer.from_pretrained(pretrained_name)
-    _base_collator = DataCollatorWithPadding(tokenizer=tokenizer)
-
-    def data_collator(features):
-        batch = _base_collator(features)
-        if "labels" in batch:
-            batch["labels"] = batch["labels"].float()
-        return batch
-
+    # 4. Tokenizer + Model
+    tokenizer    = AutoTokenizer.from_pretrained(pretrained_name)
     model_config = AutoConfig.from_pretrained(
         pretrained_name,
         num_labels=num_labels,
@@ -157,49 +95,48 @@ def train(
         label2id=label2id,
         id2label=id2label,
     )
-    if model_cfg.get("dropout_p") is not None:
-        model_config.classifier_dropout = float(model_cfg["dropout_p"])
-    task_specific_params = dict(getattr(model_config, "task_specific_params", {}) or {})
-    task_specific_params["threshold"] = threshold
-    model_config.task_specific_params = task_specific_params
 
-    model = AutoModelForSequenceClassification.from_pretrained(
-        pretrained_name,
-        config=model_config,
-    )
+    if dropout_p is not None:
+        model_config.classifier_dropout = float(dropout_p)
+        
+    model = AutoModelForSequenceClassification.from_pretrained(pretrained_name, config=model_config)
 
-    training_args = TrainingArguments(**trainer_kwargs)
+    # 5. Collator 
+    data_collator = DataCollatorWithPadding(tokenizer)
 
+    # 6. TrainingArguments
+    trainer_kwargs = {**config.get("trainer", {}), "output_dir": str(output_dir)}
+    if not trainer_kwargs.get("disable_tqdm", True):
+        trainer_kwargs["logging_strategy"] = "no"
+    if not save_model:
+        trainer_kwargs |= {"save_strategy": "no", "load_best_model_at_end": False}
+
+    # 7. Trainer
     trainer = Trainer(
         model=model,
-        args=training_args,
-        train_dataset=train_dataset,
-        eval_dataset=val_dataset,
+        args=TrainingArguments(**trainer_kwargs),
+        train_dataset=train_ds,
+        eval_dataset=val_ds,
         processing_class=tokenizer,
         data_collator=data_collator,
-        compute_metrics=build_compute_metrics(threshold),
+        compute_metrics=partial(compute_metrics, threshold=threshold),
     )
 
+    # 8. Train
     train_result = trainer.train(resume_from_checkpoint=resume_from_checkpoint)
-    train_metrics = train_result.metrics
-    trainer.log_metrics("train", train_metrics)
-    trainer.save_metrics("train", train_metrics)
+    trainer.log_metrics("train", train_result.metrics)
+    trainer.save_metrics("train", train_result.metrics)
     trainer.save_state()
 
-    eval_metrics = trainer.evaluate(eval_dataset=val_dataset, metric_key_prefix="eval")
+    # 9. Evaluate
+    eval_metrics = trainer.evaluate(eval_dataset=val_ds, metric_key_prefix="eval")
     trainer.log_metrics("eval", eval_metrics)
     trainer.save_metrics("eval", eval_metrics)
 
+    # 10. Save
     if save_model and trainer.is_world_process_zero():
         trainer.save_model()
-        tokenizer.save_pretrained(training_args.output_dir)
-
-        output_dir = Path(training_args.output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        with open(output_dir / "run_config.yaml", "w") as f:
+        with open(Path(output_dir) / "run_config.yaml", "w") as f:
             yaml.safe_dump(config, f, sort_keys=False)
 
-    return {
-        "train_metrics": train_metrics,
-        "best_metrics": eval_metrics,
-    }
+    return {"train_metrics": train_result.metrics, "eval_metrics": eval_metrics}

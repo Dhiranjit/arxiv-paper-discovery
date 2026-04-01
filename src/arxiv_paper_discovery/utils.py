@@ -25,25 +25,6 @@ def flatten_dict(d, parent_key='', sep='.'):
 
 
 
-def metric_fn(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
-    """
-    Calculates multi-label classification metrics.
-    Assumes y_true and y_pred are 2D binary arrays of shape (n_samples, n_classes).
-    """
-    precision, recall, f1, _ = precision_recall_fscore_support(
-        y_true, y_pred, average="macro", zero_division=0
-    )
-    
-    accuracy = accuracy_score(y_true, y_pred)
-    
-    return {
-        "accuracy": float(accuracy),
-        "f1": float(f1),
-        "precision": float(precision),
-        "recall": float(recall)
-    }
-
-
 def set_seed(seed: int = 42) -> None:
     """
     Sets the random seed for reproducibility across Python, NumPy, and PyTorch.
@@ -77,14 +58,31 @@ def build_scheduler(sched_cfg: dict, optimizer, epochs: int, steps_per_epoch: in
     )
 
 
-def compute_label_coverage(dataset):
+def compute_label_coverage(dataset, column: str = "categories"):
+    """Compute cumulative paper coverage as labels are added in frequency order.
+
+    Coverage is defined as AT LEAST ONE match: a paper is considered "covered"
+    as soon as any one of its categories appears in the accumulated label set.
+    A paper with multiple categories is counted the first time any of them is
+    encountered — it is never double-counted.
+
+    Args:
+        dataset: HuggingFace Dataset containing the specified column.
+        column:  Name of the column holding per-paper label lists.
+
+    Returns:
+        coverage (list[float]): Cumulative % of papers covered after including
+                                each successive label (ordered by frequency, descending).
+        sorted_labels (list[str]): Labels in the same frequency-descending order.
+    """
+    
     label_counter = Counter()
 
-    for labels in tqdm(dataset["categories"], desc="Counting labels"):
+    for labels in tqdm(dataset[column], desc="Counting labels"):
         label_counter.update(labels)
 
     sorted_labels = [l for l, _ in label_counter.most_common()]
-    label_sets = [set(labels) for labels in dataset["categories"]]
+    label_sets = [set(labels) for labels in dataset[column]]
 
     total = len(label_sets)
     covered_mask = [False] * total

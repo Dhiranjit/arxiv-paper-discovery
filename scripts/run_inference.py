@@ -185,8 +185,8 @@ def main() -> None:
         help="Maximum number of records to process (default: no limit).",
     )
     parser.add_argument(
-        "--threshold", type=float, default=None,
-        help="Override sigmoid threshold (default: use model config threshold).",
+        "--threshold", type=float, default=0.5,
+        help="Sigmoid prediction threshold (default: 0.5).",
     )
 
     args = parser.parse_args()
