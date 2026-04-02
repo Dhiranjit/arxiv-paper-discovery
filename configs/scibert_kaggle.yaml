@@ -24,10 +24,10 @@ trainer:
   logging_strategy: steps
   logging_steps: 250
   eval_strategy: steps
-  eval_steps: 3000
+  eval_steps: 1000
 
   save_strategy: steps
-  save_steps: 3000
+  save_steps: 1000
   save_total_limit: 2
   load_best_model_at_end: true
   metric_for_best_model: eval_f1
