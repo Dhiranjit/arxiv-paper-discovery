@@ -7,6 +7,7 @@ from typing import Any
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 import yaml
 from datasets import load_from_disk
 from functools import partial
@@ -46,6 +47,32 @@ def compute_metrics(eval_pred: EvalPrediction, threshold: float = 0.5) -> dict[s
         "precision": float(precision),
         "recall": float(recall),
     }
+
+
+def compute_pos_weight(dataset, num_labels: int) -> torch.Tensor:
+    """Compute pos_weight from multi-hot label column: (N - pos) / pos per label."""
+    label_counts = np.zeros(num_labels)
+    for row in dataset["labels"]:
+        label_counts += np.array(row)
+    n = len(dataset)
+    pos_weight = (n - label_counts) / np.maximum(label_counts, 1)
+    return torch.tensor(pos_weight, dtype=torch.float32)
+
+
+class WeightedTrainer(Trainer):
+    """Trainer with pos_weight support for BCEWithLogitsLoss."""
+
+    def __init__(self, *args, pos_weight: torch.Tensor | None = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.pos_weight = pos_weight
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        labels = inputs.pop("labels")
+        outputs = model(**inputs)
+        logits = outputs.logits
+        weight = self.pos_weight.to(logits.device) if self.pos_weight is not None else None
+        loss = F.binary_cross_entropy_with_logits(logits, labels.float(), pos_weight=weight)
+        return (loss, outputs) if return_outputs else loss
 
 
 def train(
@@ -96,12 +123,16 @@ def train(
         val_ds   = val_ds.shuffle(seed=seed + 1).select(range(int(len(val_ds) * sample_ratio)))
         print(f"Sampled {len(train_ds)} train / {len(val_ds)} val examples ({sample_ratio * 100:.0f}%).")
 
-    # 4. Labels — LABELS is the source of truth
+    # 4. Pos weight
+    pos_weight = compute_pos_weight(train_ds, len(LABELS))
+    print(f"pos_weight — min: {pos_weight.min():.2f}, max: {pos_weight.max():.2f}, mean: {pos_weight.mean():.2f}")
+
+    # 5. Labels — LABELS is the source of truth
     num_labels  = len(LABELS)
     label2id    = LABEL_TO_IDX
     id2label    = IDX_TO_LABEL
 
-    # 5. Tokenizer + Model
+    # 6. Tokenizer + Model
     tokenizer    = AutoTokenizer.from_pretrained(pretrained_name)
     model_config = AutoConfig.from_pretrained(
         pretrained_name,
@@ -116,18 +147,16 @@ def train(
         
     model = AutoModelForSequenceClassification.from_pretrained(pretrained_name, config=model_config)
 
-    # 6. Collator 
+    # 7. Collator 
     data_collator = DataCollatorWithPadding(tokenizer)
 
-    # 7. TrainingArguments
+    # 8. TrainingArguments
     trainer_kwargs = {**config.get("trainer", {}), "output_dir": str(output_dir)}
-    if not trainer_kwargs.get("disable_tqdm", True):
-        trainer_kwargs["logging_strategy"] = "no"
     if not save_model:
         trainer_kwargs |= {"save_strategy": "no", "load_best_model_at_end": False}
 
-    # 8. Trainer
-    trainer = Trainer(
+    # 9. Trainer
+    trainer = WeightedTrainer(
         model=model,
         args=TrainingArguments(**trainer_kwargs),
         train_dataset=train_ds,
@@ -135,20 +164,21 @@ def train(
         processing_class=tokenizer,
         data_collator=data_collator,
         compute_metrics=partial(compute_metrics, threshold=threshold),
+        pos_weight=pos_weight,
     )
 
-    # 9. Train
+    # 10. Train
     train_result = trainer.train(resume_from_checkpoint=resume_from_checkpoint)
     trainer.log_metrics("train", train_result.metrics)
     trainer.save_metrics("train", train_result.metrics)
     trainer.save_state()
 
-    # 10. Evaluate
+    # 11. Evaluate
     eval_metrics = trainer.evaluate(eval_dataset=val_ds, metric_key_prefix="eval")
     trainer.log_metrics("eval", eval_metrics)
     trainer.save_metrics("eval", eval_metrics)
 
-    # 11. Save
+    # 12. Save
     if save_model and trainer.is_world_process_zero():
         trainer.save_model()
         with open(Path(output_dir) / "run_config.yaml", "w") as f:
