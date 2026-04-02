@@ -70,7 +70,22 @@ def train(
 
     set_seed(seed)
 
-    # 2. Dataset
+    # 2. Run info
+    num_epochs = config.get("trainer", {}).get("num_train_epochs", "?")
+    mode = "Resuming from checkpoint" if resume_from_checkpoint else "Starting fresh run"
+    print(f"\n{'=' * 60}")
+    print(f"  {mode}")
+    print(f"  Model:       {pretrained_name}")
+    print(f"  Epochs:      {num_epochs}")
+    print(f"  Dataset:     {dataset_path}")
+    print(f"  Output:      {output_dir}")
+    if resume_from_checkpoint:
+        print(f"  Checkpoint:  {resume_from_checkpoint}")
+    if sample_ratio is not None:
+        print(f"  Sample:      {float(sample_ratio) * 100:.0f}%")
+    print(f"{'=' * 60}\n")
+
+    # 3. Dataset
     dataset = load_from_disk(str(dataset_path))
     train_ds, val_ds = dataset["train"], dataset["val"]
 
@@ -81,12 +96,12 @@ def train(
         val_ds   = val_ds.shuffle(seed=seed + 1).select(range(int(len(val_ds) * sample_ratio)))
         print(f"Sampled {len(train_ds)} train / {len(val_ds)} val examples ({sample_ratio * 100:.0f}%).")
 
-    # 3. Labels — LABELS is the source of truth
+    # 4. Labels — LABELS is the source of truth
     num_labels  = len(LABELS)
     label2id    = LABEL_TO_IDX
     id2label    = IDX_TO_LABEL
 
-    # 4. Tokenizer + Model
+    # 5. Tokenizer + Model
     tokenizer    = AutoTokenizer.from_pretrained(pretrained_name)
     model_config = AutoConfig.from_pretrained(
         pretrained_name,
@@ -101,17 +116,17 @@ def train(
         
     model = AutoModelForSequenceClassification.from_pretrained(pretrained_name, config=model_config)
 
-    # 5. Collator 
+    # 6. Collator 
     data_collator = DataCollatorWithPadding(tokenizer)
 
-    # 6. TrainingArguments
+    # 7. TrainingArguments
     trainer_kwargs = {**config.get("trainer", {}), "output_dir": str(output_dir)}
     if not trainer_kwargs.get("disable_tqdm", True):
         trainer_kwargs["logging_strategy"] = "no"
     if not save_model:
         trainer_kwargs |= {"save_strategy": "no", "load_best_model_at_end": False}
 
-    # 7. Trainer
+    # 8. Trainer
     trainer = Trainer(
         model=model,
         args=TrainingArguments(**trainer_kwargs),
@@ -122,18 +137,18 @@ def train(
         compute_metrics=partial(compute_metrics, threshold=threshold),
     )
 
-    # 8. Train
+    # 9. Train
     train_result = trainer.train(resume_from_checkpoint=resume_from_checkpoint)
     trainer.log_metrics("train", train_result.metrics)
     trainer.save_metrics("train", train_result.metrics)
     trainer.save_state()
 
-    # 9. Evaluate
+    # 10. Evaluate
     eval_metrics = trainer.evaluate(eval_dataset=val_ds, metric_key_prefix="eval")
     trainer.log_metrics("eval", eval_metrics)
     trainer.save_metrics("eval", eval_metrics)
 
-    # 10. Save
+    # 11. Save
     if save_model and trainer.is_world_process_zero():
         trainer.save_model()
         with open(Path(output_dir) / "run_config.yaml", "w") as f:
