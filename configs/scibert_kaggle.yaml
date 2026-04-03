@@ -23,7 +23,7 @@ trainer:
   warmup_ratio: 0.1
 
   logging_strategy: steps
-  logging_steps: 250
+  logging_steps: 100
   eval_strategy: steps
   eval_steps: 5000
 
