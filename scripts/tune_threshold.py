@@ -135,12 +135,18 @@ def main() -> None:
 
     # Baseline: scalar 0.35
     baseline_preds = (probs > 0.35).astype(np.int32)
-    _, _, baseline_f1, _ = precision_recall_fscore_support(
+    _, _, baseline_macro_f1, _ = precision_recall_fscore_support(
         labels, baseline_preds, average="macro", zero_division=0
     )
+    _, _, baseline_weighted_f1, _ = precision_recall_fscore_support(
+        labels, baseline_preds, average="weighted", zero_division=0
+    )
     tuned_preds = (probs > best_thresholds).astype(np.int32)
-    _, _, tuned_f1, _ = precision_recall_fscore_support(
+    _, _, tuned_macro_f1, _ = precision_recall_fscore_support(
         labels, tuned_preds, average="macro", zero_division=0
+    )
+    _, _, tuned_weighted_f1, _ = precision_recall_fscore_support(
+        labels, tuned_preds, average="weighted", zero_division=0
     )
 
     # Print per-class table
@@ -151,8 +157,10 @@ def main() -> None:
         label = IDX_TO_LABEL[i]
         print(f"{label:<{col_w}}  {best_thresholds[i]:>9.4f}  {best_f1s[i]:>6.4f}")
 
-    print(f"\n{YELLOW}Macro F1 — scalar 0.35 : {baseline_f1:.4f}{RESET}")
-    print(f"{GREEN}Macro F1 — per-class   : {tuned_f1:.4f}{RESET}")
+    print(f"\n{YELLOW}Macro F1     — scalar 0.35 : {baseline_macro_f1:.4f}{RESET}")
+    print(f"{GREEN}Macro F1     — per-class   : {tuned_macro_f1:.4f}{RESET}")
+    print(f"{YELLOW}Weighted F1  — scalar 0.35 : {baseline_weighted_f1:.4f}{RESET}")
+    print(f"{GREEN}Weighted F1  — per-class   : {tuned_weighted_f1:.4f}{RESET}")
 
     # Save
     thresholds_dict = {IDX_TO_LABEL[i]: float(best_thresholds[i]) for i in range(len(LABELS))}
