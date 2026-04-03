@@ -6,6 +6,7 @@ python scripts/run_eval.py \
 --model-dir experiments/run_01 \
 --dataset-dir data/processed/tok_scibert_scivocab_uncased \
 --batch-size 32
+--threshold 0.35
 """
 
 import argparse
@@ -16,6 +17,7 @@ import warnings
 from functools import partial
 from pathlib import Path
 
+import numpy as np
 from datasets import load_from_disk
 from transformers import (
     AutoModelForSequenceClassification,
@@ -26,6 +28,7 @@ from transformers import (
 )
 from transformers.utils import logging as hf_logging
 
+from arxiv_paper_discovery.label_taxonomy import IDX_TO_LABEL
 from arxiv_paper_discovery.train import compute_metrics
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -61,7 +64,14 @@ def main() -> None:
         type=float,
         default=0.5,
         metavar="[0-1]",
-        help="Sigmoid prediction threshold (default: 0.5).",
+        help="Sigmoid prediction threshold, used when no thresholds.json is found (default: 0.5).",
+    )
+    parser.add_argument(
+        "--thresholds-file",
+        type=Path,
+        default=None,
+        metavar="FILE",
+        help="Per-class thresholds JSON (default: <model-dir>/thresholds.json if it exists).",
     )
     parser.add_argument(
         "--batch-size",
@@ -74,6 +84,17 @@ def main() -> None:
 
     model_dir = Path(args.model_dir)
     output_path = model_dir / "test_results.json"
+
+    # Resolve per-class thresholds: explicit flag > auto-detect > scalar fallback
+    thresholds_file = args.thresholds_file or (model_dir / "thresholds.json")
+    per_class_thresholds: np.ndarray | None = None
+    if thresholds_file.exists():
+        with open(thresholds_file) as f:
+            thresholds_dict = json.load(f)
+        num_labels = len(IDX_TO_LABEL)
+        per_class_thresholds = np.array(
+            [thresholds_dict[IDX_TO_LABEL[i]] for i in range(num_labels)], dtype=np.float32
+        )
 
     dataset = load_from_disk(str(args.dataset_dir))
     test_dataset = dataset["test"]
@@ -88,12 +109,34 @@ def main() -> None:
         report_to="none",
         disable_tqdm=False,
     )
+
+    if per_class_thresholds is not None:
+        def metrics_fn(eval_pred):
+            logits, labels = eval_pred
+            probs = 1.0 / (1.0 + np.exp(-logits))
+            preds = (probs > per_class_thresholds).astype(np.int32)
+            from sklearn.metrics import precision_recall_fscore_support
+            precision, recall, f1, _ = precision_recall_fscore_support(
+                labels, preds, average="macro", zero_division=0
+            )
+            _, _, f1_weighted, _ = precision_recall_fscore_support(
+                labels, preds, average="weighted", zero_division=0
+            )
+            return {
+                "f1": float(f1),
+                "f1_weighted": float(f1_weighted),
+                "precision": float(precision),
+                "recall": float(recall),
+            }
+    else:
+        metrics_fn = partial(compute_metrics, threshold=args.threshold)
+
     trainer = Trainer(
         model=model,
         args=eval_args,
         processing_class=tokenizer,
         data_collator=collator,
-        compute_metrics=partial(compute_metrics, threshold=args.threshold),
+        compute_metrics=metrics_fn,
     )
 
     print(f"\n{CYAN}{'='*60}{RESET}")
@@ -102,7 +145,10 @@ def main() -> None:
     print(f"  Dataset    : {args.dataset_dir}")
     print(f"  Test count : {len(test_dataset)}")
     print(f"  Batch size : {args.batch_size}")
-    print(f"  Threshold  : {args.threshold}")
+    if per_class_thresholds is not None:
+        print(f"  Thresholds : per-class ({thresholds_file})")
+    else:
+        print(f"  Threshold  : {args.threshold} (scalar)")
     print(f"{CYAN}{'='*60}{RESET}\n")
 
     test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix="test")
