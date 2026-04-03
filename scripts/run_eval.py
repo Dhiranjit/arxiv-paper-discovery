@@ -2,14 +2,15 @@
 Evaluate a trained model on the held-out test split.
 
 Usage:
-    # Local
+# Local
 python scripts/run_eval.py \
 --model-dir experiments/run_01 \
 --dataset-dir data/processed/tok_scibert_scivocab_uncased \
 --batch-size 32 \
---threshold 0.35
+--output-dir experiments/run_01
 
-    # Kaggle (multi-GPU)
+
+# Kaggle (multi-GPU)
 accelerate launch \
 --num_processes 2 --num_machines 1 --multi_gpu --mixed_precision fp16 \
 scripts/run_eval.py \

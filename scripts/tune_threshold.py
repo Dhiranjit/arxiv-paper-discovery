@@ -9,7 +9,8 @@ Usage:
 python scripts/tune_threshold.py \
 --model-dir experiments/run_01 \
 --dataset-dir data/processed/tok_scibert_scivocab_uncased \
---batch-size 64
+--batch-size 64 \
+--output-file experiments/run_01/thresholds.json
 
 # Kaggle (multi-GPU)
 accelerate launch \
