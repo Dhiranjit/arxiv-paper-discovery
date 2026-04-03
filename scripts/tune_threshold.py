@@ -5,10 +5,20 @@ Runs inference once to get logits, then sweeps thresholds per class to
 maximise binary F1. Saves a JSON file with one threshold per label.
 
 Usage:
+# Local
 python scripts/tune_threshold.py \
 --model-dir experiments/run_01 \
 --dataset-dir data/processed/tok_scibert_scivocab_uncased \
 --batch-size 64
+
+# Kaggle (multi-GPU)
+accelerate launch \
+--num_processes 2 --num_machines 1 --multi_gpu --mixed_precision fp16 \
+scripts/tune_threshold.py \
+--model-dir /kaggle/input/<your-model>/saved_model \
+--dataset-dir /kaggle/input/<your-dataset>/tok_scibert-scivocab-uncased \
+--batch-size 256 \
+--output-file /kaggle/working/thresholds.json
 """
 
 import argparse
@@ -20,7 +30,7 @@ from pathlib import Path
 
 import numpy as np
 from datasets import load_from_disk
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, precision_recall_fscore_support
 from transformers import (
     AutoModelForSequenceClassification,
     AutoTokenizer,
@@ -91,7 +101,7 @@ def main() -> None:
     collator = DataCollatorWithPadding(tokenizer=tokenizer)
 
     eval_args = TrainingArguments(
-        output_dir=str(model_dir),
+        output_dir=str(output_file.parent),
         per_device_eval_batch_size=args.batch_size,
         report_to="none",
         disable_tqdm=False,
@@ -124,7 +134,6 @@ def main() -> None:
 
     # Baseline: scalar 0.35
     baseline_preds = (probs > 0.35).astype(np.int32)
-    from sklearn.metrics import precision_recall_fscore_support
     _, _, baseline_f1, _ = precision_recall_fscore_support(
         labels, baseline_preds, average="macro", zero_division=0
     )
@@ -145,7 +154,7 @@ def main() -> None:
     print(f"{GREEN}Macro F1 — per-class   : {tuned_f1:.4f}{RESET}")
 
     # Save
-    thresholds_dict = {IDX_TO_LABEL[i]: best_thresholds[i] for i in range(len(LABELS))}
+    thresholds_dict = {IDX_TO_LABEL[i]: float(best_thresholds[i]) for i in range(len(LABELS))}
     with open(output_file, "w") as f:
         json.dump(thresholds_dict, f, indent=2)
     print(f"\n{GREEN}Saved -> {output_file}{RESET}\n")

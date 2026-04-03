@@ -2,11 +2,22 @@
 Evaluate a trained model on the held-out test split.
 
 Usage:
+    # Local
 python scripts/run_eval.py \
 --model-dir experiments/run_01 \
 --dataset-dir data/processed/tok_scibert_scivocab_uncased \
---batch-size 32
+--batch-size 32 \
 --threshold 0.35
+
+    # Kaggle (multi-GPU)
+accelerate launch \
+--num_processes 2 --num_machines 1 --multi_gpu --mixed_precision fp16 \
+scripts/run_eval.py \
+--model-dir /kaggle/input/<your-model>/saved_model \
+--dataset-dir /kaggle/input/<your-dataset>/tok_scibert-scivocab-uncased \
+--batch-size 256 \
+--thresholds-file /kaggle/working/thresholds.json \
+--output-dir /kaggle/working
 """
 
 import argparse
@@ -27,6 +38,8 @@ from transformers import (
     TrainingArguments,
 )
 from transformers.utils import logging as hf_logging
+
+from sklearn.metrics import precision_recall_fscore_support
 
 from arxiv_paper_discovery.label_taxonomy import IDX_TO_LABEL
 from arxiv_paper_discovery.train import compute_metrics
@@ -74,6 +87,13 @@ def main() -> None:
         help="Per-class thresholds JSON (default: <model-dir>/thresholds.json if it exists).",
     )
     parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="Where to save test_results.json (default: same as --model-dir).",
+    )
+    parser.add_argument(
         "--batch-size",
         type=int,
         required=True,
@@ -83,7 +103,8 @@ def main() -> None:
     args = parser.parse_args()
 
     model_dir = Path(args.model_dir)
-    output_path = model_dir / "test_results.json"
+    output_dir = Path(args.output_dir) if args.output_dir else model_dir
+    output_path = output_dir / "test_results.json"
 
     # Resolve per-class thresholds: explicit flag > auto-detect > scalar fallback
     thresholds_file = args.thresholds_file or (model_dir / "thresholds.json")
@@ -104,7 +125,7 @@ def main() -> None:
 
     collator = DataCollatorWithPadding(tokenizer=tokenizer)
     eval_args = TrainingArguments(
-        output_dir=str(model_dir),
+        output_dir=str(output_dir),
         per_device_eval_batch_size=args.batch_size,
         report_to="none",
         disable_tqdm=False,
@@ -115,7 +136,6 @@ def main() -> None:
             logits, labels = eval_pred
             probs = 1.0 / (1.0 + np.exp(-logits))
             preds = (probs > per_class_thresholds).astype(np.int32)
-            from sklearn.metrics import precision_recall_fscore_support
             precision, recall, f1, _ = precision_recall_fscore_support(
                 labels, preds, average="macro", zero_division=0
             )
@@ -143,6 +163,7 @@ def main() -> None:
     print(f"{CYAN}Test Set Evaluation{RESET}")
     print(f"  Model      : {model_dir}")
     print(f"  Dataset    : {args.dataset_dir}")
+    print(f"  Output     : {output_dir}")
     print(f"  Test count : {len(test_dataset)}")
     print(f"  Batch size : {args.batch_size}")
     if per_class_thresholds is not None:
