@@ -56,7 +56,7 @@ def compute_pos_weight(dataset, num_labels: int) -> torch.Tensor:
         label_counts += np.array(row)
     n = len(dataset)
     pos_weight = (n - label_counts) / np.maximum(label_counts, 1)
-    return torch.tensor(pos_weight, dtype=torch.float32)
+    return torch.tensor(pos_weight, dtype=torch.float32).sqrt()
 
 
 class WeightedTrainer(Trainer):
@@ -125,7 +125,7 @@ def train(
 
     # 4. Pos weight
     pos_weight = compute_pos_weight(train_ds, len(LABELS))
-    print(f"pos_weight — min: {pos_weight.min():.2f}, max: {pos_weight.max():.2f}, mean: {pos_weight.mean():.2f}")
+    print(f"pos_weight (sqrt-scaled) — min: {pos_weight.min():.2f}, max: {pos_weight.max():.2f}, mean: {pos_weight.mean():.2f}")
 
     # 5. Labels — LABELS is the source of truth
     num_labels  = len(LABELS)
