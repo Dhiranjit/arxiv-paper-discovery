@@ -105,7 +105,12 @@ class ArticleTagger:
         )
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
-        logits = self.model(**inputs).logits
+        gpu_batch_size = 64
+        all_logits = []
+        for start in range(0, len(titles), gpu_batch_size):
+            chunk = {k: v[start : start + gpu_batch_size] for k, v in inputs.items()}
+            all_logits.append(self.model(**chunk).logits)
+        logits = torch.cat(all_logits, dim=0)
         probs = torch.sigmoid(logits)
         preds = (probs > self.thresholds).int()
 
