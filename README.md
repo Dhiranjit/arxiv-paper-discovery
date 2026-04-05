@@ -125,15 +125,17 @@ scripts/
     03_build_taxonomy_dataset.py            # map categories to taxonomy labels
     04_tokenize_dataset.py                  # tokenize and save Arrow dataset
     run_training.py                         # single training run
-    run_experiment.py                       # hyperparameter grid search
     run_eval.py                             # evaluate on test split
     tune_threshold.py                       # tune per-class thresholds on val split
     run_inference.py                        # offline batch inference
     run_serve.py                            # online inference server
 src/arxiv_paper_discovery/
+    config.py                               # project-wide constants and path helpers
+    data.py                                 # text cleaning, dataset utilities, tokenization helpers
     label_taxonomy.py                       # arXiv category → taxonomy mapping
     train.py                                # Trainer pipeline and metrics
     predictor.py                            # ArticleTagger inference engine
+    utils.py                                # reproducibility utilities and helper functions
     web/dashboard.html                      # inference dashboard UI
 ```
 
