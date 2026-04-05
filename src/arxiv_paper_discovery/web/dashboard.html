@@ -31,7 +31,8 @@
     color: var(--text);
     font-family: var(--sans);
     font-size: 14px;
-    min-height: 100vh;
+    height: 100vh;
+    overflow: hidden;
     display: grid;
     grid-template-rows: auto 1fr;
   }
@@ -94,6 +95,7 @@
     grid-template-columns: 1fr 1fr;
     gap: 0;
     height: 100%;
+    overflow: hidden;
   }
 
   .panel {
@@ -102,6 +104,8 @@
     display: flex;
     flex-direction: column;
     gap: 18px;
+    overflow-y: auto;
+    height: 100%;
   }
   .panel:last-child { border-right: none; }
 
@@ -190,7 +194,6 @@
     display: flex;
     flex-direction: column;
     gap: 16px;
-    overflow-y: auto;
   }
 
   .empty-state {
