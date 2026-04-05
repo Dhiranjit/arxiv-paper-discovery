@@ -6,7 +6,7 @@ Fine-tuned [SciBERT](https://huggingface.co/allenai/scibert_scivocab_uncased) fo
 
 ## Results
 
-Evaluated on a held-out test set (~18.7K papers) using per-class thresholds tuned on the validation split.
+Evaluated on a held-out test set (~298K papers) using per-class thresholds tuned on the validation split.
 
 | Metric      | Scalar threshold (0.35) | Per-class thresholds |
 | ----------- | ----------------------- | -------------------- |
@@ -105,8 +105,6 @@ Supports both offline batch inference and an online REST API.
 | `GET /`               | Interactive dashboard             |
 
 ### Dashboard
-
-![Dashboard — single mode](outputs/screenshots/image.png)
 
 ![Dashboard — batch mode](outputs/screenshots/image%20copy.png)
 
