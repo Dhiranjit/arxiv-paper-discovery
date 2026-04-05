@@ -104,6 +104,12 @@ Supports both offline batch inference and an online REST API.
 | `GET /health`         | Returns threshold and device info |
 | `GET /`               | Interactive dashboard             |
 
+### Dashboard
+
+![Dashboard — single mode](outputs/screenshots/image.png)
+
+![Dashboard — batch mode](outputs/screenshots/image%20copy.png)
+
 ---
 
 ## Project Structure
