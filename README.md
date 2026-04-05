@@ -51,7 +51,7 @@ Per-class thresholds give a **+7pp macro F1** improvement over a fixed scalar th
 
 </details>
 
-<!-- Add screenshots here -->
+![SciBERT Training — Full Run Summary](outputs/plots/training_curves.png)
 
 ---
 
