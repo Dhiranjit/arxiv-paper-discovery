@@ -143,11 +143,13 @@ def main() -> None:
             _, _, f1_weighted, _ = precision_recall_fscore_support(
                 labels, preds, average="weighted", zero_division=0
             )
+            hit_rate = float(np.any(preds & labels, axis=1).mean())
             return {
                 "f1": float(f1),
                 "f1_weighted": float(f1_weighted),
                 "precision": float(precision),
                 "recall": float(recall),
+                "hit_rate": hit_rate,
             }
     else:
         metrics_fn = partial(compute_metrics, threshold=args.threshold)

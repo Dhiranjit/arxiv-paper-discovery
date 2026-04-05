@@ -37,8 +37,3 @@ trainer:
   report_to: ["none"]
   disable_tqdm: false
   fp16: true   # set to true on Kaggle/Colab with GPU for mixed-precision training
-
-sweep:
-  trainer.learning_rate: [1.0e-05, 2.0e-05, 3.0e-05, 5.0e-05]
-  model.dropout_p: [0.1, 0.3, 0.5]
-  trainer.warmup_ratio: [0.05, 0.1, 0.2]

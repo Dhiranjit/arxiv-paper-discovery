@@ -164,23 +164,6 @@
   textarea.abstract-area { height: 160px; }
   textarea.batch-area  { height: 320px; font-size: 11px; line-height: 1.6; }
 
-  /* ── Server URL ── */
-  .server-row {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-  }
-  .server-row input { flex: 1; }
-  .server-row .pill {
-    font-family: var(--mono);
-    font-size: 10px;
-    padding: 4px 10px;
-    border-radius: 20px;
-    background: var(--muted);
-    color: var(--text-dim);
-    white-space: nowrap;
-  }
-
   /* ── Run button ── */
   .run-btn {
     font-family: var(--mono);
@@ -366,10 +349,7 @@
     <!-- Server config -->
     <div class="field">
       <div class="label">Server</div>
-      <div class="server-row">
-        <input type="text" id="serverUrl" value="http://127.0.0.1:8000" placeholder="http://127.0.0.1:8000" />
-        <span class="pill">Ray Serve</span>
-      </div>
+      <input type="text" id="serverUrl" value="http://127.0.0.1:8000" placeholder="http://127.0.0.1:8000" />
     </div>
 
     <!-- Single mode -->
@@ -437,7 +417,7 @@
       const res  = await fetch(`${base}/health`);
       const data = await res.json();
       badge.className = 'health-badge ok';
-      text.textContent = `ok · thr=${data.threshold} · ${data.device}`;
+      text.textContent = `ok · ${data.device}`;
     } catch {
       badge.className = 'health-badge fail';
       text.textContent = 'unreachable';

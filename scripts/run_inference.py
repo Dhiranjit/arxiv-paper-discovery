@@ -1,5 +1,5 @@
 """
-scripts/batch_infer.py
+scripts/run_inference.py
 
 Run batch inference over an untokenized dataset and write predictions to JSONL.
 
@@ -12,29 +12,23 @@ Output : JSONL where every line is the original record extended with:
          and, when present/decodable from input labels:
              "true_tags"        : list[str]
 
-Design notes
-------------
-- Processes data in batches without loading the entire input into memory.
-- Supports both dataset-first and file-first workflows:
-  - `--input-hf` for HuggingFace datasets saved via save_to_disk()
-  - `--input-jsonl` for raw line-delimited JSON
-- `--limit` is intended for quick smoke tests over the first N records.
+Thresholds are loaded automatically from thresholds.json in the checkpoint
+directory (per-class). Falls back to scalar 0.5 if the file is absent.
 
 Usage examples
 --------------
 # From a HuggingFace dataset split saved to disk:
-python scripts/batch_infer.py \
-    --checkpoint saved_models/my_run \
+python scripts/run_inference.py \
+    --checkpoint saved_models/my_run/best_model \
     --input-hf   data/processed/arxiv_taxonomy_dataset \
     --split      test \
     --output     outputs/test_predictions.jsonl \
     --batch-size 64 \
-    --limit      500 \
-    --threshold 0.35
+    --limit      500
 
 # From a raw JSONL file:
-python scripts/batch_infer.py \
-    --checkpoint saved_models/my_run \
+python scripts/run_inference.py \
+    --checkpoint saved_models/my_run/best_model \
     --input-jsonl data/raw/papers.jsonl \
     --output      outputs/papers_tagged.jsonl \
     --limit       200
@@ -68,46 +62,22 @@ RESET  = "\033[0m"
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _decode_multihot(multihot: list[int | float], index_to_class: dict[int, str]) -> list[str]:
-    """Convert a multi-hot binary vector to a list of class name strings."""
-    return [index_to_class[i] for i, val in enumerate(multihot) if float(val) > 0.5]
-
-
 def _load_hf_split(dataset_dir: Path, split: str) -> Dataset:
-    """Load a HuggingFace dataset split."""
     ds = load_from_disk(str(dataset_dir))
     if isinstance(ds, DatasetDict):
-        if split not in ds:
-            available_splits = ", ".join(ds.keys())
-            raise ValueError(
-                f"Split '{split}' not found in {dataset_dir}. "
-                f"Available splits: {available_splits}."
-            )
         return ds[split]
     return ds
 
 
-def _iter_hf_batches(
-    split_ds: Dataset,
-    batch_size: int,
-    limit: int | None,
-) -> Iterator[list[dict]]:
-    """Yield fixed-size batches from a HuggingFace dataset split."""
+def _iter_hf_batches(split_ds: Dataset, batch_size: int, limit: int | None) -> Iterator[list[dict]]:
     max_records = min(len(split_ds), limit) if limit is not None else len(split_ds)
     for start in range(0, max_records, batch_size):
-        end = min(start + batch_size, max_records)
-        yield split_ds.select(range(start, end)).to_list()
+        yield split_ds.select(range(start, min(start + batch_size, max_records))).to_list()
 
 
-def _iter_jsonl_batches(
-    file_path: Path,
-    batch_size: int,
-    limit: int | None,
-) -> Iterator[list[dict]]:
-    """Yield fixed-size batches from a JSONL file without loading the full file."""
+def _iter_jsonl_batches(file_path: Path, batch_size: int, limit: int | None) -> Iterator[list[dict]]:
     emitted = 0
     batch: list[dict] = []
-
     with open(file_path, encoding="utf-8") as f:
         for line in f:
             if not line.strip():
@@ -115,33 +85,15 @@ def _iter_jsonl_batches(
             batch.append(json.loads(line))
             if len(batch) < batch_size:
                 continue
-
-            if limit is not None and emitted + len(batch) > limit:
-                batch = batch[: limit - emitted]
-            if batch:
-                yield batch
-                emitted += len(batch)
+            yield batch
+            emitted += len(batch)
             if limit is not None and emitted >= limit:
                 return
             batch = []
-
-    if batch and (limit is None or emitted < limit):
-        if limit is not None:
-            batch = batch[: limit - emitted]
-        if batch:
-            yield batch
+    if batch:
+        yield batch
 
 
-def _extract_true_tags(record: dict, index_to_class: dict[int, str]) -> list[str] | None:
-    """Return decoded true tags when labels are present and usable; otherwise None."""
-    labels = record.get("labels")
-    if labels is None or not isinstance(labels, list):
-        return None
-    if not all(isinstance(x, (int, float)) for x in labels):
-        return None
-    if len(labels) != len(index_to_class):
-        return None
-    return _decode_multihot(labels, index_to_class)
 
 
 # ---------------------------------------------------------------------------
@@ -149,90 +101,67 @@ def _extract_true_tags(record: dict, index_to_class: dict[int, str]) -> list[str
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Batch inference over raw arxiv papers."
-    )
+    parser = argparse.ArgumentParser(description="Batch inference over raw arxiv papers.")
 
-    parser.add_argument(
-        "--checkpoint", type=Path, required=True,
-        help="Path to a Hugging Face model directory saved via save_pretrained().",
-    )
+    parser.add_argument("--checkpoint", type=Path, required=True,
+        help="Path to a Hugging Face model directory saved via save_pretrained().")
 
     input_group = parser.add_mutually_exclusive_group(required=True)
-    input_group.add_argument(
-        "--input-hf", type=Path, metavar="HF_DATASET_DIR",
-        help="Root directory of a HuggingFace dataset saved with save_to_disk().",
-    )
-    input_group.add_argument(
-        "--input-jsonl", type=Path, metavar="JSONL_FILE",
-        help="Path to a raw JSONL file (one JSON object per line, must have 'title').",
-    )
+    input_group.add_argument("--input-hf", type=Path, metavar="HF_DATASET_DIR",
+        help="Root directory of a HuggingFace dataset saved with save_to_disk().")
+    input_group.add_argument("--input-jsonl", type=Path, metavar="JSONL_FILE",
+        help="Path to a raw JSONL file (one JSON object per line, must have 'title').")
 
-    parser.add_argument(
-        "--split", type=str, default="test",
-        help="Which dataset split to use when --input-hf is set (default: test).",
-    )
-    parser.add_argument(
-        "--output", type=Path, required=True,
-        help="Destination JSONL file for predictions.",
-    )
-    parser.add_argument(
-        "--batch-size", type=int, default=32,
-        help="Articles per forward pass (default: 32).",
-    )
-    parser.add_argument(
-        "--limit", type=int, default=None, metavar="N",
-        help="Maximum number of records to process (default: no limit).",
-    )
-    parser.add_argument(
-        "--threshold", type=float, default=0.5,
-        help="Sigmoid prediction threshold (default: 0.5).",
-    )
+    parser.add_argument("--split", type=str, default="test",
+        help="Which dataset split to use when --input-hf is set (default: test).")
+    parser.add_argument("--output", type=Path, required=True,
+        help="Destination JSONL file for predictions.")
+    parser.add_argument("--batch-size", type=int, default=32,
+        help="Articles per forward pass (default: 32).")
+    parser.add_argument("--limit", type=int, default=None, metavar="N",
+        help="Maximum number of records to process (default: no limit).")
 
     args = parser.parse_args()
 
-    if args.batch_size <= 0:
-        parser.error("--batch-size must be a positive integer.")
-    if args.limit is not None and args.limit <= 0:
-        parser.error("--limit must be a positive integer.")
-
     # ---- Build batch iterator ----
     if args.input_hf:
-        if not args.input_hf.exists():
-            raise FileNotFoundError(f"HF dataset not found: {args.input_hf}")
         split_ds = _load_hf_split(args.input_hf, args.split)
+        split_size = len(split_ds)
+        target_total = min(split_size, args.limit) if args.limit is not None else split_size
         source_label = f"HF dataset ({args.input_hf.name}/{args.split})"
-        target_total = min(len(split_ds), args.limit) if args.limit is not None else len(split_ds)
         batches = _iter_hf_batches(split_ds, args.batch_size, args.limit)
-        total_batches = (target_total + args.batch_size - 1) // args.batch_size if target_total else 0
+        total_batches = (target_total + args.batch_size - 1) // args.batch_size
     else:
-        if not args.input_jsonl.exists():
-            raise FileNotFoundError(f"JSONL file not found: {args.input_jsonl}")
-        source_label = str(args.input_jsonl)
+        split_size = None
         target_total = args.limit
+        source_label = str(args.input_jsonl)
         batches = _iter_jsonl_batches(args.input_jsonl, args.batch_size, args.limit)
         total_batches = None
 
     # ---- Load model ----
-    tagger = ArticleTagger(args.checkpoint, threshold=args.threshold)
+    tagger = ArticleTagger(args.checkpoint)
 
     # ---- Banner ----
     print(f"\n{CYAN}{'='*60}{RESET}")
     print(f"{CYAN}Batch inference{RESET}")
     print(f"  Source      : {source_label}")
     print(f"  Output      : {args.output}")
+    if split_size is not None:
+        print(f"  Dataset size: {split_size}")
     if target_total is None:
-        print("  Articles    : unknown (streaming JSONL)")
+        print("  Processing  : unknown (streaming JSONL)")
     else:
-        print(f"  Articles    : {target_total}")
+        print(f"  Processing  : {target_total}")
     print(f"  Limit       : {args.limit if args.limit is not None else 'none'}")
     print(f"  Batch size  : {args.batch_size}")
-    print(f"  Threshold   : {tagger.threshold}")
     print(f"{CYAN}{'='*60}{RESET}\n")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     start = time.time()
     processed = 0
+
+    all_true: list[list[str]] = []
+    all_pred: list[list[str]] = []
 
     with open(args.output, "w", encoding="utf-8") as out_f:
         progress_total = {"total": total_batches} if total_batches is not None else {}
@@ -243,14 +172,18 @@ def main() -> None:
             predictions = tagger.predict(titles, abstracts)
 
             for record, pred in zip(batch, predictions):
+                record_id = record.get("id") or record.get("arxiv_id") or record.get("paper_id")
+                true_tags = record.get("labels")
                 out_record = {
-                    **record,
+                    "id":                record_id,
+                    "title":             record.get("title", ""),
+                    "true_tags":         true_tags,
                     "predicted_tags":    pred["tags"],
                     "tag_probabilities": pred["probabilities"],
                 }
-                true_tags = _extract_true_tags(record, tagger.index_to_class)
                 if true_tags is not None:
-                    out_record["true_tags"] = true_tags
+                    all_true.append(true_tags)
+                    all_pred.append(pred["tags"])
                 out_f.write(json.dumps(out_record) + "\n")
             processed += len(batch)
 
@@ -260,7 +193,24 @@ def main() -> None:
     print(f"\n{GREEN}Done!{RESET}")
     print(f"  Predictions saved : {args.output}")
     print(f"  Total processed   : {processed}")
-    print(f"  Elapsed           : {elapsed:.1f}s  ({throughput:.1f} articles/s)\n")
+    print(f"  Elapsed           : {elapsed:.1f}s  ({throughput:.1f} articles/s)")
+
+    if all_true:
+        from sklearn.preprocessing import MultiLabelBinarizer
+        from sklearn.metrics import f1_score, precision_score, recall_score
+        mlb = MultiLabelBinarizer(classes=list(tagger.index_to_class.values()))
+        y_true = mlb.fit_transform(all_true)
+        y_pred = mlb.transform(all_pred)
+        hit_rate = sum(
+            any(p in true for p in pred)
+            for true, pred in zip(all_true, all_pred)
+        ) / len(all_true)
+        print(f"\n{CYAN}Quick metrics (n={len(all_true)}){RESET}")
+        print(f"  Micro F1        : {f1_score(y_true, y_pred, average='micro', zero_division=0):.4f}")
+        print(f"  Micro Precision : {precision_score(y_true, y_pred, average='micro', zero_division=0):.4f}")
+        print(f"  Micro Recall    : {recall_score(y_true, y_pred, average='micro', zero_division=0):.4f}")
+        print(f"  Hit Rate        : {hit_rate:.4f}  (≥1 correct tag per sample)")
+    print()
 
 
 if __name__ == "__main__":

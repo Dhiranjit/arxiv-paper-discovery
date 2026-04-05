@@ -41,11 +41,14 @@ def compute_metrics(eval_pred: EvalPrediction, threshold: float = 0.5) -> dict[s
         labels, preds, average="weighted", zero_division=0,
     )
 
+    hit_rate = float(np.any(preds & labels, axis=1).mean())
+
     return {
         "f1": float(f1),
         "f1_weighted": float(f1_weighted),
         "precision": float(precision),
         "recall": float(recall),
+        "hit_rate": hit_rate,
     }
 
 
@@ -133,9 +136,12 @@ def train(
     id2label    = IDX_TO_LABEL
 
     # 6. Tokenizer + Model
-    tokenizer    = AutoTokenizer.from_pretrained(pretrained_name)
+    # When resuming, load from checkpoint so no layers are randomly re-initialized.
+    # When starting fresh, load from pretrained_name (triggers the expected classifier init warning).
+    model_source = Path(resume_from_checkpoint) if resume_from_checkpoint else pretrained_name
+    tokenizer    = AutoTokenizer.from_pretrained(model_source)
     model_config = AutoConfig.from_pretrained(
-        pretrained_name,
+        model_source,
         num_labels=num_labels,
         problem_type="multi_label_classification",
         label2id=label2id,
@@ -144,8 +150,8 @@ def train(
 
     if dropout_p is not None:
         model_config.classifier_dropout = float(dropout_p)
-        
-    model = AutoModelForSequenceClassification.from_pretrained(pretrained_name, config=model_config)
+
+    model = AutoModelForSequenceClassification.from_pretrained(model_source, config=model_config)
 
     # 7. Collator 
     data_collator = DataCollatorWithPadding(tokenizer)
@@ -180,8 +186,9 @@ def train(
 
     # 12. Save
     if save_model and trainer.is_world_process_zero():
-        trainer.save_model()
-        with open(Path(output_dir) / "run_config.yaml", "w") as f:
+        best_model_dir = Path(output_dir) / "best_model"
+        trainer.save_model(str(best_model_dir))
+        with open(best_model_dir / "run_config.yaml", "w") as f:
             yaml.safe_dump(config, f, sort_keys=False)
 
     return {"train_metrics": train_result.metrics, "eval_metrics": eval_metrics}
