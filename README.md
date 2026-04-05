@@ -10,10 +10,11 @@ Evaluated on a held-out test set (~18.7K papers) using per-class thresholds tune
 
 | Metric      | Scalar threshold (0.35) | Per-class thresholds |
 | ----------- | ----------------------- | -------------------- |
-| Macro F1    | 0.7073                  | **0.7777**           |
-| Weighted F1 | 0.7715                  | **0.8213**           |
-| Precision   | —                       | 0.7672               |
-| Recall      | —                       | 0.7887               |
+| Macro F1    | 0.7073                  | **0.7774**           |
+| Weighted F1 | 0.7715                  | **0.8207**           |
+| Precision   | —                       | 0.7666               |
+| Recall      | —                       | 0.7897               |
+| Hit Rate    | —                       | **0.9662**           |
 
 Per-class thresholds give a **+7pp macro F1** improvement over a fixed scalar threshold.
 
